@@ -51,7 +51,7 @@ pub struct CacheOptions {
 /// #[tokio::main]
 /// async fn main() {
 ///     // Create a cache with default options
-///     let options = CacheOptions {max_memory_mb: 100, db_path: "cache.sqlite".to_string(), cleanup_interval: Duration::from_secs(60)};
+///     let options = CacheOptions {max_memory_mb: 100, db_path: "tests/db/comment_code_test_cache.sqlite".to_string(), cleanup_interval: Duration::from_secs(60)};
 ///     let cache = Cache::new(options).await.expect("Failed to create cache");
 ///
 ///     // Set a value
@@ -81,6 +81,14 @@ impl Cache {
         let max_items = NonZeroUsize::new(max_items.max(1)).unwrap();
 
         println!("Setting up database connection pool for: {}", options.db_path);
+
+        // Ensure the directory for the database exists
+        if let Some(parent) = std::path::Path::new(&options.db_path).parent() {
+            if !parent.exists() {
+                println!("Creating directory for database: {:?}", parent);
+                std::fs::create_dir_all(parent)?;
+            }
+        }
 
         // Check if the database exists, if not create it
         let db_url = format!("sqlite:{}", options.db_path);
