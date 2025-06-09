@@ -14,7 +14,79 @@ pub mod schema;
 pub mod models;
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_cleanup_expired_entries() {
+        println!("UNIT TEST: Testing cleanup of expired entries");
+
+        // Create a test cache
+        let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
+        let db_path = format!("tests/db/test_cache_unit_{}.db", test_name);
+        println!("Creating test cache with database path: {}", db_path);
+
+        // Ensure the tests/db directory exists
+        std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
+        println!("Created tests/db directory if it didn't exist");
+
+        // Remove the database file if it exists
+        if std::path::Path::new(&db_path).exists() {
+            std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
+            println!("Removed existing database file");
+        }
+
+        // Create a cache with a very short cleanup interval
+        let options = CacheOptions {
+            max_memory_mb: 10,
+            db_path,
+            cleanup_interval: Duration::from_millis(100), // Very short interval to trigger cleanup quickly
+        };
+        println!("Configured cache with 100ms cleanup interval");
+
+        let cache = Cache::new(options).unwrap();
+        println!("Successfully created cache instance");
+
+        let key = "test_key";
+        let value = b"test_value";
+
+        // Set with 1 second TTL
+        println!("Setting key '{}' with 1 second TTL", key);
+        cache.set(key, value, Some(Duration::from_secs(1))).unwrap();
+
+        // Should be available immediately
+        println!("Verifying key is available immediately after setting");
+        let result = cache.get(key).unwrap();
+        assert_eq!(result, Some(value.to_vec()));
+        println!("Key was successfully retrieved immediately after setting");
+
+        // Wait for expiration and cleanup
+        println!("Waiting for 2 seconds to allow key to expire...");
+        thread::sleep(Duration::from_secs(2));
+        println!("Wait complete, key should now be expired");
+
+        // Call get multiple times to ensure the expiration check is triggered
+        // The first call might not trigger the check if the value is still in the memory cache
+        println!("Attempting to retrieve expired key (may require multiple attempts)");
+        for attempt in 1..=3 {
+            println!("Attempt #{} to verify key has expired", attempt);
+            let result = cache.get(key).unwrap();
+            if result.is_none() {
+                // Test passes if we get None
+                println!("SUCCESS: Key has expired and was properly removed from cache");
+                return;
+            }
+            // Wait a bit before trying again
+            println!("Key still exists in cache, waiting 500ms before next attempt");
+            thread::sleep(Duration::from_millis(500));
+        }
+
+        // If we get here, the test fails
+        panic!("Value did not expire after multiple attempts");
+    }
+}
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -62,6 +134,30 @@ impl Default for CacheOptions {
     }
 }
 
+/// A key-value cache with both in-memory and persistent storage.
+///
+/// The cache stores values in both memory (using an LRU cache) and in a SQLite database.
+/// Values can be set with an optional time-to-live (TTL).
+///
+/// # Examples
+///
+/// ```
+/// use dig_key_value_store::{Cache, CacheOptions};
+/// use std::time::Duration;
+///
+/// // Create a cache with default options
+/// let options = CacheOptions::default();
+/// let cache = Cache::new(options).expect("Failed to create cache");
+///
+/// // Set a value
+/// let key = "example_key";
+/// let value = b"example_value";
+/// cache.set(key, value, None).expect("Failed to set value");
+///
+/// // Get a value
+/// let result = cache.get(key).expect("Failed to get value");
+/// assert_eq!(result, Some(value.to_vec()));
+/// ```
 pub struct Cache {
     memory_cache: Arc<Mutex<LruCache<String, Vec<u8>>>>,
     db_pool: DbPool,
