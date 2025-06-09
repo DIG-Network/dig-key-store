@@ -6,10 +6,8 @@ description = "A dual-layer caching library with SQLite backend and in-memory LR
 license = "MIT"
 
 [dependencies]
-diesel = { version = "2.1.0", features = ["sqlite", "r2d2"] }
-diesel_migrations = "2.1.0"
+sqlx = { version = "0.7", features = ["runtime-tokio", "tls-rustls", "sqlite", "migrate", "macros"] }
 lru = "0.10.0"
-r2d2 = "0.8.10"
 thiserror = "1.0.40"
 anyhow = "1.0.70"
 serde = { version = "1.0.160", features = ["derive"] }
@@ -18,6 +16,9 @@ tokio = { version = "1.28.0", features = ["full"] }
 chrono = "0.4.24"
 log = "0.4.17"
 env_logger = "0.10.0"
+futures = "0.3"
+async-trait = "0.1"
+base64ct = "=1.6.0"
 
 [dev-dependencies]
 tempfile = "3.5.0"
