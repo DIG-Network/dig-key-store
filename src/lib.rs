@@ -37,16 +37,6 @@ pub struct CacheOptions {
     pub cleanup_interval: Duration,
 }
 
-impl Default for CacheOptions {
-    fn default() -> Self {
-        Self {
-            max_memory_mb: 100,
-            db_path: String::from("cache.db"),
-            cleanup_interval: Duration::from_secs(60 * 30), // 30 minutes
-        }
-    }
-}
-
 /// A key-value cache with both in-memory and persistent storage.
 ///
 /// The cache stores values in both memory (using an LRU cache) and in a SQLite database.
@@ -61,7 +51,7 @@ impl Default for CacheOptions {
 /// #[tokio::main]
 /// async fn main() {
 ///     // Create a cache with default options
-///     let options = CacheOptions::default();
+///     let options = CacheOptions {max_memory_mb: 100, db_path: "cache.sqlite".to_string(), cleanup_interval: Duration::from_secs(60)};
 ///     let cache = Cache::new(options).await.expect("Failed to create cache");
 ///
 ///     // Set a value
@@ -376,7 +366,7 @@ mod tests {
 
         // Create a test cache
         let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-        let db_path = format!("tests/db/test_cache_unit_{}.db", test_name);
+        let db_path = format!("tests/db/test_cache_unit_{}.sqlite", test_name);
         println!("Creating test cache with database path: {}", db_path);
 
         // Ensure the tests/db directory exists

@@ -5,7 +5,7 @@ use tokio::time::sleep;
 async fn create_test_cache() -> Cache {
     // Use a unique path for each test
     let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-    let db_path = format!("tests/db/test_cache_{}.db", test_name);
+    let db_path = format!("tests/db/test_cache_{}.sqlite", test_name);
     println!("Using database path: {}", db_path);
 
     // Ensure the tests/db directory exists
