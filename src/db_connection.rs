@@ -17,17 +17,6 @@ pub enum DbError {
     PoolError(String),
 }
 
-/// Checks if the given SQLx error is a SQLite "busy" or "locked" error
-pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db_err) = err {
-        // SQLite error codes: SQLITE_BUSY = 5, SQLITE_LOCKED = 6
-        if let Some(code) = db_err.code() {
-            let code_str = code.to_string();
-            return code_str == "5" || code_str == "6";
-        }
-    }
-    false
-}
 
 /// Sets up a SQLite database connection pool
 pub async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
@@ -83,25 +72,4 @@ pub async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError>
     println!("Migrations executed successfully");
 
     Ok(db_pool)
-}
-
-/// Retries a database operation until it succeeds or encounters a non-busy error
-pub async fn retry_on_busy<F, Fut, T>(operation: F) -> Result<T, DbError>
-where
-    F: Fn() -> Fut + Send + Sync,
-    Fut: std::future::Future<Output = Result<T, sqlx::Error>> + Send,
-    T: Send,
-{
-    loop {
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(err) if is_sqlite_busy_error(&err) => {
-                // If we get a busy error, wait for 10 seconds and retry
-                println!("Database is busy/locked, retrying in 10 seconds...");
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                continue;
-            },
-            Err(err) => return Err(DbError::DatabaseError(err)),
-        }
-    }
 }

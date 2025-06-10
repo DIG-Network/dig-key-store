@@ -9,6 +9,39 @@ use tokio::time;
 
 mod db_connection;
 
+/// Checks if the given SQLx error is an SQLite "busy" or "locked" error
+pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db_err) = err {
+        // SQLite error codes: SQLITE_BUSY = 5, SQLITE_LOCKED = 6
+        if let Some(code) = db_err.code() {
+            let code_str = code.to_string();
+            return code_str == "5" || code_str == "6";
+        }
+    }
+    false
+}
+
+/// Retries a database operation until it succeeds or encounters a non-busy error
+pub async fn retry_on_busy<F, Fut, T>(operation: F) -> Result<T, CacheError>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Result<T, sqlx::Error>> + Send,
+    T: Send,
+{
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(err) if is_sqlite_busy_error(&err) => {
+                // If we get a busy error, wait for 10 seconds and retry
+                println!("Database is busy/locked, retrying in 10 seconds...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            },
+            Err(err) => return Err(CacheError::DatabaseError(err)),
+        }
+    }
+}
+
 // No schema or models needed with sqlx
 
 #[derive(Debug, Error)]
@@ -264,7 +297,7 @@ impl Cache {
 
         // Use the retry function to handle busy errors
         let db_pool = self.db_pool.clone();
-        db_connection::retry_on_busy(move || {
+        retry_on_busy(move || {
             let key = key.to_string();
             let value = value.to_vec();
             let db_pool = db_pool.clone();
@@ -345,7 +378,7 @@ impl Cache {
 
     async fn delete_from_db(&self, key: &str) -> Result<(), CacheError> {
         let db_pool = self.db_pool.clone();
-        db_connection::retry_on_busy(move || {
+        retry_on_busy(move || {
             let key = key.to_string();
             let db_pool = db_pool.clone();
             async move {
