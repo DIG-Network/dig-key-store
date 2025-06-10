@@ -2,10 +2,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroUsize;
 
-use sqlx::{sqlite::SqlitePoolOptions, migrate::MigrateDatabase, Sqlite, Pool, Row};
+use sqlx::{Sqlite, Pool, Row};
 use lru::LruCache;
 use thiserror::Error;
 use tokio::time;
+
+mod db_connection;
 
 // No schema or models needed with sqlx
 
@@ -28,6 +30,9 @@ pub enum CacheError {
 
     #[error("Pool error: {0}")]
     PoolError(String),
+
+    #[error("DB connection error: {0}")]
+    DbConnectionError(#[from] db_connection::DbError),
 }
 
 #[derive(Debug, Clone)]
@@ -74,66 +79,15 @@ pub struct Cache {
 }
 
 impl Cache {
+
     pub async fn new(options: CacheOptions) -> Result<Self, CacheError> {
         // Calculate max items based on memory limit (rough approximation)
         // Assuming average key size of 50 bytes and value size of 1000 bytes
         let max_items = (options.max_memory_mb * 1024 * 1024) / (50 + 1000);
         let max_items = NonZeroUsize::new(max_items.max(1)).unwrap();
 
-        println!("Setting up database connection pool for: {}", options.db_path);
-
-        // Ensure the directory for the database exists
-        if let Some(parent) = std::path::Path::new(&options.db_path).parent() {
-            if !parent.exists() {
-                println!("Creating directory for database: {:?}", parent);
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-
-        // Check if the database exists, if not create it
-        let db_url = format!("sqlite:{}", options.db_path);
-        if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
-            println!("Database does not exist, creating it");
-            Sqlite::create_database(&db_url).await?;
-        }
-
-        // Set up database connection pool
-        let db_pool = match SqlitePoolOptions::new()
-            .max_connections(10)
-            .connect(&db_url).await {
-            Ok(pool) => {
-                println!("Database connection pool created successfully");
-                pool
-            },
-            Err(e) => {
-                println!("Error creating database connection pool: {}", e);
-                return Err(CacheError::PoolError(e.to_string()));
-            }
-        };
-
-        // Run migrations by reading from migration files
-        println!("Running migrations from files");
-
-        // Read the migration SQL from the file
-        println!("Reading migration SQL from file");
-        let migration_path = "migrations/20230101000000_create_cache_table/up.sql";
-        let create_table_sql = match std::fs::read_to_string(migration_path) {
-            Ok(sql) => sql,
-            Err(e) => {
-                println!("Error reading migration file: {}", e);
-                return Err(CacheError::MigrationError(format!("Failed to read migration file: {}", e)));
-            }
-        };
-
-        // Execute the migration SQL
-        println!("Executing migration SQL");
-        match sqlx::query(&create_table_sql).execute(&db_pool).await {
-            Ok(_) => println!("Migrations executed successfully"),
-            Err(e) => {
-                println!("Error executing migrations: {}", e);
-                return Err(CacheError::MigrationError(e.to_string()));
-            }
-        };
+        // Set up database connection using the db_connection module
+        let db_pool = db_connection::setup_db_connection(&options.db_path).await?;
 
         // Create LRU cache
         let memory_cache = Arc::new(Mutex::new(LruCache::new(max_items)));
@@ -308,41 +262,52 @@ impl Cache {
             .unwrap()
             .as_secs() as i64;
 
-        // For SQLite, we need to use a different approach for upsert
-        println!("Checking if key exists: {}", key);
-        let existing = sqlx::query("SELECT EXISTS(SELECT 1 FROM cache WHERE cache_key = ?)")
-            .bind(key)
-            .fetch_one(&self.db_pool)
-            .await?
-            .get::<bool, _>(0);
+        // Use the retry function to handle busy errors
+        let db_pool = self.db_pool.clone();
+        db_connection::retry_on_busy(move || {
+            let key = key.to_string();
+            let value = value.to_vec();
+            let db_pool = db_pool.clone();
+            async move {
+                // For SQLite, we need to use a different approach for upsert
+                println!("Checking if key exists: {}", key);
+                let existing = sqlx::query("SELECT EXISTS(SELECT 1 FROM cache WHERE cache_key = ?)")
+                    .bind(&key)
+                    .fetch_one(&db_pool)
+                    .await?
+                    .get::<bool, _>(0);
 
-        println!("Key exists: {}", existing);
+                println!("Key exists: {}", existing);
 
-        if existing {
-            println!("Updating existing key: {}", key);
-            sqlx::query(
-                "UPDATE cache SET cache_value = ?, expires = ?, last_accessed = ? WHERE cache_key = ?"
-            )
-            .bind(value)
-            .bind(expires)
-            .bind(now)
-            .bind(key)
-            .execute(&self.db_pool)
-            .await?;
-            println!("Update successful");
-        } else {
-            println!("Inserting new key: {}", key);
-            sqlx::query(
-                "INSERT INTO cache (cache_key, cache_value, expires, last_accessed) VALUES (?, ?, ?, ?)"
-            )
-            .bind(key)
-            .bind(value)
-            .bind(expires)
-            .bind(now)
-            .execute(&self.db_pool)
-            .await?;
-            println!("Insert successful");
-        }
+                if existing {
+                    println!("Updating existing key: {}", key);
+                    sqlx::query(
+                        "UPDATE cache SET cache_value = ?, expires = ?, last_accessed = ? WHERE cache_key = ?"
+                    )
+                    .bind(&value)
+                    .bind(expires)
+                    .bind(now)
+                    .bind(&key)
+                    .execute(&db_pool)
+                    .await?;
+                    println!("Update successful");
+                } else {
+                    println!("Inserting new key: {}", key);
+                    sqlx::query(
+                        "INSERT INTO cache (cache_key, cache_value, expires, last_accessed) VALUES (?, ?, ?, ?)"
+                    )
+                    .bind(&key)
+                    .bind(&value)
+                    .bind(expires)
+                    .bind(now)
+                    .execute(&db_pool)
+                    .await?;
+                    println!("Insert successful");
+                }
+
+                Ok(())
+            }
+        }).await?;
 
         Ok(())
     }
@@ -379,10 +344,18 @@ impl Cache {
     }
 
     async fn delete_from_db(&self, key: &str) -> Result<(), CacheError> {
-        sqlx::query("DELETE FROM cache WHERE cache_key = ?")
-            .bind(key)
-            .execute(&self.db_pool)
-            .await?;
+        let db_pool = self.db_pool.clone();
+        db_connection::retry_on_busy(move || {
+            let key = key.to_string();
+            let db_pool = db_pool.clone();
+            async move {
+                sqlx::query("DELETE FROM cache WHERE cache_key = ?")
+                    .bind(&key)
+                    .execute(&db_pool)
+                    .await
+                    .map(|_| ())
+            }
+        }).await?;
 
         Ok(())
     }
