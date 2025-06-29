@@ -7,7 +7,9 @@ use lru::LruCache;
 use thiserror::Error;
 use tokio::time;
 
-mod db_connection;
+mod database;
+
+static MAX_LRU_CACHE_ITEMS: usize = usize::MAX;
 
 /// Checks if the given SQLx error is an SQLite "busy" or "locked" error
 pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
@@ -65,7 +67,7 @@ pub enum CacheError {
     PoolError(String),
 
     #[error("DB connection error: {0}")]
-    DbConnectionError(#[from] db_connection::DbError),
+    DbConnectionError(#[from] database::DbError),
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +85,7 @@ pub struct CacheOptions {
 /// # Examples
 ///
 /// ```
-/// use dig_key_value_store::{Cache, CacheOptions};
+/// use dig_key_store::{Cache, CacheOptions};
 /// use std::time::Duration;
 ///
 /// #[tokio::main]
@@ -105,24 +107,18 @@ pub struct CacheOptions {
 pub struct Cache {
     memory_cache: Arc<Mutex<LruCache<String, Vec<u8>>>>,
     db_pool: Pool<Sqlite>,
-    #[allow(dead_code)]
     options: CacheOptions,
-    _cleanup_task: Option<tokio::task::JoinHandle<()>>,
     current_memory_usage: Arc<Mutex<usize>>,
 }
 
 impl Cache {
 
     pub async fn new(options: CacheOptions) -> Result<Self, CacheError> {
-        // Calculate max items based on memory limit (rough approximation)
-        // Assuming average key size of 50 bytes and value size of 1000 bytes
-        let max_items = (options.max_memory_mb * 1024 * 1024) / (50 + 1000);
-        let max_items = NonZeroUsize::new(max_items.max(1)).unwrap();
-
         // Set up database connection using the db_connection module
-        let db_pool = db_connection::setup_db_connection(&options.db_path).await?;
+        let db_pool = database::init(&options.db_path).await?;
 
         // Create LRU cache
+        let max_items = NonZeroUsize::new(MAX_LRU_CACHE_ITEMS).unwrap();
         let memory_cache = Arc::new(Mutex::new(LruCache::new(max_items)));
 
         // Initialize memory usage tracker
@@ -147,7 +143,6 @@ impl Cache {
             memory_cache,
             db_pool,
             options,
-            _cleanup_task: Some(cleanup_task),
             current_memory_usage: Arc::new(Mutex::new(0)),
         })
     }

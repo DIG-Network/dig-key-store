@@ -1,5 +1,5 @@
 use std::time::Duration;
-use dig_key_value_store::{Cache, CacheOptions};
+use dig_key_store::{Cache, CacheOptions};
 use tokio::time::sleep;
 
 async fn create_test_cache() -> Cache {
