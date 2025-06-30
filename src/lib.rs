@@ -2,14 +2,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroUsize;
 
-use sqlx::{Sqlite, Pool, Row};
+use sqlx::{Sqlite, Pool};
 use lru::LruCache;
 use thiserror::Error;
 use tokio::time;
 
+// Import database queries
+use crate::database::{
+    key_exists, 
+    update_cache_entry, 
+    insert_cache_entry, 
+    get_cache_entry, 
+    update_last_accessed, 
+    delete_cache_entry, 
+    get_expired_keys, 
+    delete_keys_batch
+};
+
 mod database;
 
-static MAX_LRU_CACHE_ITEMS: usize = usize::MAX;
+static MAX_LRU_CACHE_ITEMS: usize = 1000;
 
 /// Checks if the given SQLx error is an SQLite "busy" or "locked" error
 pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
@@ -68,6 +80,15 @@ pub enum CacheError {
 
     #[error("DB connection error: {0}")]
     DbConnectionError(#[from] database::DbError),
+
+    #[error("System time error: {0}")]
+    SystemTimeError(#[from] std::time::SystemTimeError),
+
+    #[error("Mutex lock error")]
+    MutexLockError,
+
+    #[error("Invalid value: {0}")]
+    InvalidValue(String),
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +139,8 @@ impl Cache {
         let db_pool = database::init(&options.db_path).await?;
 
         // Create LRU cache
-        let max_items = NonZeroUsize::new(MAX_LRU_CACHE_ITEMS).unwrap();
+        let max_items = NonZeroUsize::new(MAX_LRU_CACHE_ITEMS)
+            .ok_or_else(|| CacheError::InvalidValue("MAX_LRU_CACHE_ITEMS cannot be zero".to_string()))?;
         let memory_cache = Arc::new(Mutex::new(LruCache::new(max_items)));
 
         // Initialize memory usage tracker
@@ -130,7 +152,7 @@ impl Cache {
         let thread_memory_cache = Arc::clone(&memory_cache);
         let thread_memory_usage = Arc::clone(&current_memory_usage);
 
-        let cleanup_task = tokio::spawn(async move {
+        let _cleanup_task = tokio::spawn(async move {
             let mut interval = time::interval(cleanup_interval);
             loop {
                 interval.tick().await;
@@ -143,25 +165,24 @@ impl Cache {
             memory_cache,
             db_pool,
             options,
-            current_memory_usage: Arc::new(Mutex::new(0)),
+            current_memory_usage,
         })
     }
 
     pub async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
-        let expires = ttl.map(|duration| {
+        let expires = ttl.map(|duration| -> Result<i64, CacheError> {
             let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .duration_since(UNIX_EPOCH)?
                 .as_secs() as i64;
-            now + duration.as_secs() as i64
-        });
+            Ok(now + duration.as_secs() as i64)
+        }).transpose()?;
 
         // Update SQLite
         self.set_in_db(key, value, expires).await?;
 
         // Update memory cache and track memory usage
-        let mut memory_cache = self.memory_cache.lock().unwrap();
-        let mut memory_usage = self.current_memory_usage.lock().unwrap();
+        let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+        let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
 
         // Check if key already exists in memory cache
         let _old_value_size = if let Some(old_value) = memory_cache.get(key) {
@@ -203,7 +224,7 @@ impl Cache {
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
         // Try memory cache first
         {
-            let mut memory_cache = self.memory_cache.lock().unwrap();
+            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
             if let Some(value) = memory_cache.get(key) {
                 return Ok(Some(value.clone()));
             }
@@ -215,8 +236,7 @@ impl Cache {
                 // Check if expired
                 if let Some(expires) = expires {
                     let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
+                        .duration_since(UNIX_EPOCH)?
                         .as_secs() as i64;
                     if now > expires {
                         // Remove expired entry
@@ -226,8 +246,8 @@ impl Cache {
                 }
 
                 // Update memory cache and track memory usage
-                let mut memory_cache = self.memory_cache.lock().unwrap();
-                let mut memory_usage = self.current_memory_usage.lock().unwrap();
+                let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+                let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
 
                 // Add new value size to memory usage
                 let new_value = value.clone();
@@ -265,8 +285,8 @@ impl Cache {
     pub async fn delete(&self, key: &str) -> Result<(), CacheError> {
         // Remove from memory cache and update memory usage
         {
-            let mut memory_cache = self.memory_cache.lock().unwrap();
-            let mut memory_usage = self.current_memory_usage.lock().unwrap();
+            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
 
             // Get the value being deleted to calculate its size
             if let Some(value) = memory_cache.pop(key) {
@@ -286,8 +306,7 @@ impl Cache {
 
     async fn set_in_db(&self, key: &str, value: &[u8], expires: Option<i64>) -> Result<(), CacheError> {
         let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .duration_since(UNIX_EPOCH)?
             .as_secs() as i64;
 
         // Use the retry function to handle busy errors
@@ -299,37 +318,17 @@ impl Cache {
             async move {
                 // For SQLite, we need to use a different approach for upsert
                 println!("Checking if key exists: {}", key);
-                let existing = sqlx::query("SELECT EXISTS(SELECT 1 FROM cache WHERE cache_key = ?)")
-                    .bind(&key)
-                    .fetch_one(&db_pool)
-                    .await?
-                    .get::<bool, _>(0);
+                let existing = key_exists(&db_pool, &key).await?;
 
                 println!("Key exists: {}", existing);
 
                 if existing {
                     println!("Updating existing key: {}", key);
-                    sqlx::query(
-                        "UPDATE cache SET cache_value = ?, expires = ?, last_accessed = ? WHERE cache_key = ?"
-                    )
-                    .bind(&value)
-                    .bind(expires)
-                    .bind(now)
-                    .bind(&key)
-                    .execute(&db_pool)
-                    .await?;
+                    update_cache_entry(&db_pool, &key, &value, expires, now).await?;
                     println!("Update successful");
                 } else {
                     println!("Inserting new key: {}", key);
-                    sqlx::query(
-                        "INSERT INTO cache (cache_key, cache_value, expires, last_accessed) VALUES (?, ?, ?, ?)"
-                    )
-                    .bind(&key)
-                    .bind(&value)
-                    .bind(expires)
-                    .bind(now)
-                    .execute(&db_pool)
-                    .await?;
+                    insert_cache_entry(&db_pool, &key, &value, expires, now).await?;
                     println!("Insert successful");
                 }
 
@@ -341,16 +340,11 @@ impl Cache {
     }
 
     async fn get_from_db(&self, key: &str) -> Result<Option<(Vec<u8>, Option<i64>)>, CacheError> {
-        let result = sqlx::query("SELECT cache_value, expires FROM cache WHERE cache_key = ?")
-            .bind(key)
-            .fetch_optional(&self.db_pool)
-            .await?;
+        let result = get_cache_entry(&self.db_pool, key).await?;
 
         match result {
-            Some(row) => {
-                let value: Vec<u8> = row.get("cache_value");
-                let expires: Option<i64> = row.get("expires");
-                Ok(Some((value, expires)))
+            Some(entry) => {
+                Ok(Some((entry.cache_value, entry.expires)))
             },
             None => Ok(None),
         }
@@ -358,15 +352,10 @@ impl Cache {
 
     async fn update_last_accessed(&self, key: &str) -> Result<(), CacheError> {
         let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .duration_since(UNIX_EPOCH)?
             .as_secs() as i64;
 
-        sqlx::query("UPDATE cache SET last_accessed = ? WHERE cache_key = ?")
-            .bind(now)
-            .bind(key)
-            .execute(&self.db_pool)
-            .await?;
+        update_last_accessed(&self.db_pool, key, now).await?;
 
         Ok(())
     }
@@ -377,11 +366,7 @@ impl Cache {
             let key = key.to_string();
             let db_pool = db_pool.clone();
             async move {
-                sqlx::query("DELETE FROM cache WHERE cache_key = ?")
-                    .bind(&key)
-                    .execute(&db_pool)
-                    .await
-                    .map(|_| ())
+                delete_cache_entry(&db_pool, &key).await
             }
         }).await?;
 
@@ -390,26 +375,22 @@ impl Cache {
 
     async fn cleanup_expired_entries(db_pool: &Pool<Sqlite>, memory_cache: &Arc<Mutex<LruCache<String, Vec<u8>>>>, memory_usage: &Arc<Mutex<usize>>) -> Result<(), CacheError> {
         let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .duration_since(UNIX_EPOCH)?
             .as_secs() as i64;
 
         // Get expired keys
-        let rows = sqlx::query("SELECT cache_key FROM cache WHERE expires < ? AND expires IS NOT NULL")
-            .bind(now)
-            .fetch_all(db_pool)
-            .await?;
+        let cache_keys = get_expired_keys(db_pool, now).await?;
 
-        let expired_keys: Vec<String> = rows.iter()
-            .map(|row| row.get("cache_key"))
+        let expired_keys: Vec<String> = cache_keys.into_iter()
+            .map(|key| key.cache_key)
             .collect();
 
         // Remove from memory cache and update memory usage
         {
-            let mut memory_cache = memory_cache.lock().unwrap();
-            let mut memory_usage = memory_usage.lock().unwrap();
+            let mut memory_cache = memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_usage = memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
             for key in &expired_keys {
-                if let Some(value) = memory_cache.pop(key) {
+                if let Some(value) = memory_cache.pop(key.as_str()) {
                     // Subtract the size of the key and value from memory usage
                     let size = value.len() + key.len();
                     *memory_usage = memory_usage.saturating_sub(size);
@@ -419,20 +400,7 @@ impl Cache {
 
         // Remove from database
         if !expired_keys.is_empty() {
-            // SQLite doesn't support array parameters, so we need to build a query with placeholders
-            let placeholders = expired_keys.iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-
-            let query = format!("DELETE FROM cache WHERE cache_key IN ({})", placeholders);
-
-            let mut query_builder = sqlx::query(&query);
-            for key in &expired_keys {
-                query_builder = query_builder.bind(key);
-            }
-
-            query_builder.execute(db_pool).await?;
+            delete_keys_batch(db_pool, &expired_keys).await?;
         }
 
         Ok(())
@@ -451,7 +419,9 @@ mod tests {
 
         // Create a test cache
         let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-        let db_path = format!("tests/db/test_cache_unit_{}.sqlite", test_name);
+        // Replace :: with _ to avoid issues with file paths
+        let safe_test_name = test_name.replace("::", "_");
+        let db_path = format!("tests/db/test_cache_unit_{}.sqlite", safe_test_name);
         println!("Creating test cache with database path: {}", db_path);
 
         // Ensure the tests/db directory exists
@@ -472,7 +442,7 @@ mod tests {
         };
         println!("Configured cache with 100ms cleanup interval");
 
-        let cache = Cache::new(options).await.unwrap();
+        let cache = Cache::new(options).await.expect("Failed to create cache for test");
         println!("Successfully created cache instance");
 
         let key = "test_key";
@@ -480,11 +450,11 @@ mod tests {
 
         // Set with 1 second TTL
         println!("Setting key '{}' with 1 second TTL", key);
-        cache.set(key, value, Some(Duration::from_secs(1))).await.unwrap();
+        cache.set(key, value, Some(Duration::from_secs(1))).await.expect("Failed to set key in test");
 
         // Should be available immediately
         println!("Verifying key is available immediately after setting");
-        let result = cache.get(key).await.unwrap();
+        let result = cache.get(key).await.expect("Failed to get key in test");
         assert_eq!(result, Some(value.to_vec()));
         println!("Key was successfully retrieved immediately after setting");
 
@@ -498,7 +468,7 @@ mod tests {
         println!("Attempting to retrieve expired key (may require multiple attempts)");
         for attempt in 1..=3 {
             println!("Attempt #{} to verify key has expired", attempt);
-            let result = cache.get(key).await.unwrap();
+            let result = cache.get(key).await.expect("Failed to get key in test attempt");
             if result.is_none() {
                 // Test passes if we get None
                 println!("SUCCESS: Key has expired and was properly removed from cache");
