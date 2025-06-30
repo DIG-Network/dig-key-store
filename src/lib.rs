@@ -134,6 +134,24 @@ pub struct Cache {
 
 impl Cache {
 
+    /// Evicts items from the LRU cache if memory usage exceeds the limit
+    fn evict_if_memory_pressure(&self, memory_cache: &mut LruCache<String, Vec<u8>>, memory_usage: &mut usize) {
+        let max_memory_bytes = self.options.max_memory_mb * 1024 * 1024;
+        while *memory_usage > max_memory_bytes && memory_cache.len() > 1 {
+            // Evict the least recently used item
+            if let Some((evicted_key, evicted_value)) = memory_cache.pop_lru() {
+                // Subtract the size of the evicted key and value from memory usage
+                let evicted_size = evicted_key.len() + evicted_value.len();
+                *memory_usage = memory_usage.saturating_sub(evicted_size);
+                println!("Evicted key '{}' due to memory pressure. Memory usage: {}/{} bytes", 
+                         evicted_key, *memory_usage, max_memory_bytes);
+            } else {
+                // No more items to evict
+                break;
+            }
+        }
+    }
+
     pub async fn new(options: CacheOptions) -> Result<Self, CacheError> {
         // Set up database connection using the db_connection module
         let db_pool = database::init(&options.db_path).await?;
@@ -199,21 +217,8 @@ impl Cache {
         let new_value_size = new_value.len() + key.len();
         *memory_usage += new_value_size;
 
-        // Check if memory usage exceeds the limit
-        let max_memory_bytes = self.options.max_memory_mb * 1024 * 1024;
-        while *memory_usage > max_memory_bytes && memory_cache.len() > 1 {
-            // Evict the least recently used item
-            if let Some((evicted_key, evicted_value)) = memory_cache.pop_lru() {
-                // Subtract the size of the evicted key and value from memory usage
-                let evicted_size = evicted_key.len() + evicted_value.len();
-                *memory_usage = memory_usage.saturating_sub(evicted_size);
-                println!("Evicted key '{}' due to memory pressure. Memory usage: {}/{} bytes", 
-                         evicted_key, *memory_usage, max_memory_bytes);
-            } else {
-                // No more items to evict
-                break;
-            }
-        }
+        // Check if memory usage exceeds the limit and perform lazy eviction
+        self.evict_if_memory_pressure(&mut memory_cache, &mut memory_usage);
 
         // Update memory cache
         memory_cache.put(key.to_string(), new_value);
@@ -222,53 +227,63 @@ impl Cache {
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
-        // Try memory cache first
-        {
+        // Check if key exists in memory cache
+        let memory_value = {
             let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
             if let Some(value) = memory_cache.get(key) {
-                return Ok(Some(value.clone()));
+                Some(value.clone())
+            } else {
+                None
             }
-        }
+        };
 
-        // If not in memory, try database
+        // Check database for TTL information and value if not in memory
         match self.get_from_db(key).await? {
-            Some((value, expires)) => {
+            Some((db_value, expires)) => {
                 // Check if expired
                 if let Some(expires) = expires {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)?
                         .as_secs() as i64;
                     if now > expires {
-                        // Remove expired entry
+                        // Remove expired entry from database
                         self.delete_from_db(key).await?;
+
+                        // Remove from memory cache if it exists there
+                        if memory_value.is_some() {
+                            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+                            let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+
+                            if let Some(value) = memory_cache.pop(key) {
+                                // Subtract the size of the key and value from memory usage
+                                let size = value.len() + key.len();
+                                *memory_usage = memory_usage.saturating_sub(size);
+                                println!("Removed expired key '{}' from memory cache during get operation", key);
+                            }
+                        }
+
                         return Ok(None);
                     }
                 }
 
-                // Update memory cache and track memory usage
+                // If we have a memory value, it's valid (not expired) so return it
+                if let Some(value) = memory_value {
+                    // Update last accessed time
+                    self.update_last_accessed(key).await?;
+                    return Ok(Some(value));
+                }
+
+                // Otherwise, update memory cache with the database value
                 let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
                 let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
 
                 // Add new value size to memory usage
-                let new_value = value.clone();
+                let new_value = db_value.clone();
                 let new_value_size = new_value.len() + key.len();
                 *memory_usage += new_value_size;
 
-                // Check if memory usage exceeds the limit
-                let max_memory_bytes = self.options.max_memory_mb * 1024 * 1024;
-                while *memory_usage > max_memory_bytes && memory_cache.len() > 1 {
-                    // Evict the least recently used item
-                    if let Some((evicted_key, evicted_value)) = memory_cache.pop_lru() {
-                        // Subtract the size of the evicted key and value from memory usage
-                        let evicted_size = evicted_key.len() + evicted_value.len();
-                        *memory_usage = memory_usage.saturating_sub(evicted_size);
-                        println!("Evicted key '{}' due to memory pressure in get(). Memory usage: {}/{} bytes", 
-                                 evicted_key, *memory_usage, max_memory_bytes);
-                    } else {
-                        // No more items to evict
-                        break;
-                    }
-                }
+                // Check if memory usage exceeds the limit and perform lazy eviction
+                self.evict_if_memory_pressure(&mut memory_cache, &mut memory_usage);
 
                 // Update memory cache
                 memory_cache.put(key.to_string(), new_value);
@@ -276,9 +291,24 @@ impl Cache {
                 // Update last accessed time
                 self.update_last_accessed(key).await?;
 
-                Ok(Some(value))
+                Ok(Some(db_value))
             }
-            None => Ok(None),
+            None => {
+                // If not in database but in memory (shouldn't happen normally), remove from memory
+                if memory_value.is_some() {
+                    let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+                    let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+
+                    if let Some(value) = memory_cache.pop(key) {
+                        // Subtract the size of the key and value from memory usage
+                        let size = value.len() + key.len();
+                        *memory_usage = memory_usage.saturating_sub(size);
+                        println!("Removed key '{}' from memory cache that was not in database", key);
+                    }
+                }
+
+                Ok(None)
+            },
         }
     }
 

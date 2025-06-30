@@ -119,3 +119,39 @@ async fn test_expiration() {
     // If we get here, the test fails
     panic!("Value did not expire after multiple attempts");
 }
+
+#[tokio::test]
+async fn test_memory_cache_ttl_eviction() {
+    println!("\nINTEGRATION TEST: Testing TTL eviction from memory cache");
+
+    let cache = create_test_cache().await;
+    let key = "memory_cache_key";
+    let value = b"memory_cache_value";
+
+    // Set with 1 second TTL
+    println!("Setting key '{}' with 1 second TTL", key);
+    cache.set(key, value, Some(Duration::from_secs(1))).await.unwrap();
+
+    // Get the key to ensure it's in the memory cache
+    println!("Getting key '{}' to ensure it's in memory cache", key);
+    let result = cache.get(key).await.unwrap();
+    assert_eq!(result, Some(value.to_vec()));
+    println!("Key was successfully retrieved and should now be in memory cache");
+
+    // Wait for expiration
+    println!("Waiting for 2 seconds to allow key to expire...");
+    sleep(Duration::from_secs(2)).await;
+    println!("Wait complete, key should now be expired");
+
+    // Get the key again - it should be evicted due to TTL expiration
+    println!("Getting key '{}' after expiration - should be evicted", key);
+    let result = cache.get(key).await.unwrap();
+    assert_eq!(result, None, "Key should have been evicted due to TTL expiration");
+    println!("SUCCESS: Key was properly evicted on get due to TTL expiration");
+
+    // Try to get the key again - it should still be None since it was removed from both memory and DB
+    println!("Getting key '{}' again - should still be None", key);
+    let result = cache.get(key).await.unwrap();
+    assert_eq!(result, None, "Key should still be None after eviction");
+    println!("SUCCESS: Key remains evicted after first get operation");
+}
