@@ -11,7 +11,7 @@ async fn create_test_cache() -> Cache {
     println!("Using database path: {}", db_path);
 
     // Ensure the tests/db directory exists
-    std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
+    std::fs::create_dir_all("/db").expect("Failed to create tests/db directory");
     println!("Created tests/db directory if it didn't exist");
 
     // Remove the database file if it exists
@@ -22,10 +22,8 @@ async fn create_test_cache() -> Cache {
 
     let options = CacheOptions {
         max_memory_mb: 10,
-        db_path,
-        cleanup_interval: Duration::from_millis(100), // Very short interval to trigger cleanup quickly
+        db_path
     };
-    println!("Configured cache with 100ms cleanup interval");
 
     match Cache::new(options).await {
         Ok(cache) => {

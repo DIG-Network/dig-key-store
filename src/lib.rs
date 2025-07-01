@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroUsize;
+use std::result::Result;
 
 use sqlx::{Sqlite, Pool};
 use lru::LruCache;
@@ -20,6 +21,7 @@ use crate::database::{
 };
 
 mod database;
+pub mod napi;
 
 static MAX_LRU_CACHE_ITEMS: usize = 1000;
 
@@ -95,7 +97,6 @@ pub enum CacheError {
 pub struct CacheOptions {
     pub max_memory_mb: usize,
     pub db_path: String,
-    pub cleanup_interval: Duration,
 }
 
 /// A key-value cache with both in-memory and persistent storage.
@@ -112,7 +113,7 @@ pub struct CacheOptions {
 /// #[tokio::main]
 /// async fn main() {
 ///     // Create a cache with default options
-///     let options = CacheOptions {max_memory_mb: 100, db_path: "tests/db/comment_code_test_cache.sqlite".to_string(), cleanup_interval: Duration::from_secs(60)};
+///     let options = CacheOptions {max_memory_mb: 100, db_path: "tests/db/comment_code_test_cache.sqlite".to_string()};
 ///     let cache = Cache::new(options).await.expect("Failed to create cache");
 ///
 ///     // Set a value
@@ -163,21 +164,6 @@ impl Cache {
 
         // Initialize memory usage tracker
         let current_memory_usage = Arc::new(Mutex::new(0));
-
-        // Set up cleanup task
-        let cleanup_interval = options.cleanup_interval;
-        let thread_db_pool = db_pool.clone();
-        let thread_memory_cache = Arc::clone(&memory_cache);
-        let thread_memory_usage = Arc::clone(&current_memory_usage);
-
-        let _cleanup_task = tokio::spawn(async move {
-            let mut interval = time::interval(cleanup_interval);
-            loop {
-                interval.tick().await;
-                // Clean up expired entries
-                let _ = Self::cleanup_expired_entries(&thread_db_pool, &thread_memory_cache, &thread_memory_usage).await;
-            }
-        });
 
         Ok(Self {
             memory_cache,
@@ -468,9 +454,7 @@ mod tests {
         let options = CacheOptions {
             max_memory_mb: 10,
             db_path,
-            cleanup_interval: Duration::from_millis(100), // Very short interval to trigger cleanup quickly
         };
-        println!("Configured cache with 100ms cleanup interval");
 
         let cache = Cache::new(options).await.expect("Failed to create cache for test");
         println!("Successfully created cache instance");
