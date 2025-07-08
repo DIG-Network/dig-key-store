@@ -44,13 +44,25 @@ where
     Fut: std::future::Future<Output = Result<T, sqlx::Error>> + Send,
     T: Send,
 {
+    // Use a constant, minimal delay for high performance
+    let retry_delay_ms = 10; // Fixed 10ms delay between retries
+    let max_retries = 10;
+    let mut retry_count = 0;
+
     loop {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(err) if is_sqlite_busy_error(&err) => {
-                // If we get a busy error, wait for 10 seconds and retry
-                println!("Database is busy/locked, retrying in 10 seconds...");
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                retry_count += 1;
+                if retry_count > max_retries {
+                    println!("Database is busy/locked, max retries ({}) exceeded", max_retries);
+                    return Err(CacheError::DatabaseError(err));
+                }
+
+                // If we get a busy error, wait with a constant minimal delay and retry
+                println!("Database is busy/locked, retrying in {}ms (attempt {}/{})", 
+                         retry_delay_ms, retry_count, max_retries);
+                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                 continue;
             },
             Err(err) => return Err(CacheError::DatabaseError(err)),
@@ -356,7 +368,16 @@ impl Cache {
     }
 
     async fn get_from_db(&self, key: &str) -> Result<Option<(Vec<u8>, Option<i64>)>, CacheError> {
-        let result = get_cache_entry(&self.db_pool, key).await?;
+        let db_pool = self.db_pool.clone();
+        let key_str = key.to_string();
+
+        let result = retry_on_busy(move || {
+            let key = key_str.clone();
+            let db_pool = db_pool.clone();
+            async move {
+                get_cache_entry(&db_pool, &key).await
+            }
+        }).await?;
 
         match result {
             Some(entry) => {
@@ -371,7 +392,17 @@ impl Cache {
             .duration_since(UNIX_EPOCH)?
             .as_secs() as i64;
 
-        update_last_accessed(&self.db_pool, key, now).await?;
+        let db_pool = self.db_pool.clone();
+        let key_str = key.to_string();
+
+        retry_on_busy(move || {
+            let key = key_str.clone();
+            let db_pool = db_pool.clone();
+            let now = now;
+            async move {
+                update_last_accessed(&db_pool, &key, now).await
+            }
+        }).await?;
 
         Ok(())
     }
@@ -385,39 +416,6 @@ impl Cache {
                 delete_cache_entry(&db_pool, &key).await
             }
         }).await?;
-
-        Ok(())
-    }
-
-    async fn cleanup_expired_entries(db_pool: &Pool<Sqlite>, memory_cache: &Arc<Mutex<LruCache<String, Vec<u8>>>>, memory_usage: &Arc<Mutex<usize>>) -> Result<(), CacheError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
-
-        // Get expired keys
-        let cache_keys = get_expired_keys(db_pool, now).await?;
-
-        let expired_keys: Vec<String> = cache_keys.into_iter()
-            .map(|key| key.cache_key)
-            .collect();
-
-        // Remove from memory cache and update memory usage
-        {
-            let mut memory_cache = memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-            let mut memory_usage = memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
-            for key in &expired_keys {
-                if let Some(value) = memory_cache.pop(key.as_str()) {
-                    // Subtract the size of the key and value from memory usage
-                    let size = value.len() + key.len();
-                    *memory_usage = memory_usage.saturating_sub(size);
-                }
-            }
-        }
-
-        // Remove from database
-        if !expired_keys.is_empty() {
-            delete_keys_batch(db_pool, &expired_keys).await?;
-        }
 
         Ok(())
     }
