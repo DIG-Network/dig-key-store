@@ -1,14 +1,14 @@
 use std::path::Path;
-use sqlx::{sqlite::SqlitePoolOptions, migrate::{MigrateDatabase, Migrator}, Sqlite, Pool, FromRow};
+use sqlx::{sqlite::SqlitePoolOptions, migrate::{MigrateDatabase, Migrator}, Sqlite, Pool, FromRow, Error};
 use thiserror::Error;
+use crate::is_sqlite_busy_error;
+
+static MIGRATOR: Migrator = sqlx::migrate!();
 
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] sqlx::Error),
-
-    #[error("Migration error: {0}")]
-    MigrationError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -18,87 +18,182 @@ pub enum DbError {
 }
 
 pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
-    let db_connection = setup_db_connection(db_path).await?;
-    run_migrations(&db_connection).await?;
-    Ok(db_connection)
-}
+    // Maximum number of retries for the entire initialization process
+    let max_init_retries = 10;
+    let mut init_retry_count = 0;
 
-async fn run_migrations(db_connection: &Pool<Sqlite>) -> Result<(), DbError> {
-    println!("Running migrations");
-
-    // Check if the cache table already exists
-    let table_exists = sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
-        .fetch_optional(db_connection)
-        .await
-        .map_err(|e| DbError::DatabaseError(e))?
-        .is_some();
-
-    if table_exists {
-        println!("Cache table already exists");
-        return Ok(());
-    }
-
-    // Define the migrations path
-    let migrations_path = Path::new("./migrations");
-
-    // Try running the migrations using the SQLx API first
-    let migrator = match Migrator::new(migrations_path).await {
-        Ok(migrator) => migrator,
-        Err(e) => {
-            println!("Error creating migrator: {}", e);
-            return Err(DbError::MigrationError(format!("Failed to create migrator: {}", e)));
+    // Retry the entire initialization process if needed
+    loop {
+        if init_retry_count > 0 {
+            println!("Retrying entire database initialization (attempt {}/{})", init_retry_count, max_init_retries);
+            tokio::time::sleep(std::time::Duration::from_millis(100 * init_retry_count)).await;
         }
-    };
 
-    if let Ok(_) = migrator.run(db_connection).await {
-        println!("Migrations completed successfully via SQLx API");
+        let db_connection = match setup_db_connection(db_path).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                println!("Error setting up database connection: {:?}", e);
+                init_retry_count += 1;
+                if init_retry_count >= max_init_retries {
+                    return Err(e);
+                }
+                continue;
+            }
+        };
 
-        // Verify that the cache table exists after migrations
-        let table_exists = sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
-            .fetch_optional(db_connection)
+        // First, check if the cache table already exists
+        // If it does, we can skip migrations entirely
+        let cache_table_exists = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
+            .fetch_optional(&db_connection)
             .await
-            .map_err(|e| DbError::DatabaseError(e))?
-            .is_some();
+        {
+            Ok(result) => result.is_some(),
+            Err(e) => {
+                println!("Error checking if cache table exists: {:?}", e);
+                if is_sqlite_busy_error(&e) {
+                    init_retry_count += 1;
+                    if init_retry_count >= max_init_retries {
+                        return Err(DbError::DatabaseError(e));
+                    }
+                    continue;
+                }
+                return Err(DbError::DatabaseError(e));
+            }
+        };
 
-        if table_exists {
-            println!("Cache table created by SQLx migrations");
-            return Ok(());
+        if cache_table_exists {
+            println!("Cache table already exists, skipping migrations");
+            return Ok(db_connection);
         }
-    }
 
-    // If SQLx migrations didn't create the table, run the SQL directly
-    println!("Running SQL migration directly");
+        // Check if the _sqlx_migrations table exists
+        let migration_table_exists = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'")
+            .fetch_optional(&db_connection)
+            .await
+        {
+            Ok(result) => result.is_some(),
+            Err(e) => {
+                println!("Error checking if migrations table exists: {:?}", e);
+                if is_sqlite_busy_error(&e) {
+                    init_retry_count += 1;
+                    if init_retry_count >= max_init_retries {
+                        return Err(DbError::DatabaseError(e));
+                    }
+                    continue;
+                }
+                return Err(DbError::DatabaseError(e));
+            }
+        };
 
-    // Read the SQL from the migration file
-    let up_sql_path = migrations_path.join("20230101000000_create_cache_table").join("up.sql");
-    let sql = std::fs::read_to_string(&up_sql_path)
-        .map_err(|e| {
-            println!("Error reading migration file: {}", e);
-            DbError::IoError(e)
-        })?;
+        if migration_table_exists {
+            println!("Migration table exists but cache table doesn't - this is unexpected");
+            println!("Will try to run migrations anyway");
+        }
 
-    // Execute the SQL directly
-    sqlx::query(&sql)
-        .execute(db_connection)
-        .await
-        .map_err(|e| {
-            println!("Error executing SQL directly: {}", e);
-            DbError::DatabaseError(e)
-        })?;
+        // Try to run migrations
+        match MIGRATOR.run(&db_connection).await {
+            Ok(_) => {
+                println!("Migrations applied successfully");
 
-    // Verify that the cache table exists now
-    let table_exists = sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
-        .fetch_optional(db_connection)
-        .await
-        .map_err(|e| DbError::DatabaseError(e))?
-        .is_some();
+                // Verify that the cache table was created
+                let cache_table_created = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
+                    .fetch_optional(&db_connection)
+                    .await
+                {
+                    Ok(result) => result.is_some(),
+                    Err(e) => {
+                        println!("Error checking if cache table was created: {:?}", e);
+                        if is_sqlite_busy_error(&e) {
+                            init_retry_count += 1;
+                            if init_retry_count >= max_init_retries {
+                                return Err(DbError::DatabaseError(e));
+                            }
+                            continue;
+                        }
+                        return Err(DbError::DatabaseError(e));
+                    }
+                };
 
-    if table_exists {
-        println!("Cache table created successfully");
-        Ok(())
-    } else {
-        println!("Failed to create cache table");
-        Err(DbError::MigrationError("Failed to create cache table".to_string()))
+                if cache_table_created {
+                    println!("Cache table created successfully");
+                    return Ok(db_connection);
+                } else {
+                    println!("Warning: Migrations succeeded but cache table wasn't created");
+                    init_retry_count += 1;
+                    if init_retry_count >= max_init_retries {
+                        return Err(DbError::PoolError("Migrations succeeded but cache table wasn't created".to_string()));
+                    }
+                    continue;
+                }
+            },
+            Err(migration_error) => {
+                let sqlx_error = Error::from(migration_error);
+
+                // If it's a busy error, retry the whole process
+                if is_sqlite_busy_error(&sqlx_error) {
+                    println!("Database is busy during migration, retrying entire initialization");
+                    init_retry_count += 1;
+                    if init_retry_count >= max_init_retries {
+                        return Err(DbError::DatabaseError(sqlx_error));
+                    }
+                    continue;
+                }
+
+                // If it's a unique constraint error, it likely means migrations have already been applied
+                if let sqlx::Error::Database(db_err) = &sqlx_error {
+                    println!("Database error during migration: {:?}", db_err);
+
+                    if let Some(code) = db_err.code() {
+                        // SQLite error code 1555 is "UNIQUE constraint failed"
+                        if code.to_string() == "1555" {
+                            println!("Unique constraint error during migration: {}", db_err.message());
+
+                            // Wait a bit to let any concurrent migrations finish
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                            // Check if the cache table exists now
+                            let cache_table_exists = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
+                                .fetch_optional(&db_connection)
+                                .await
+                            {
+                                Ok(result) => result.is_some(),
+                                Err(e) => {
+                                    println!("Error checking if cache table exists after constraint error: {:?}", e);
+                                    if is_sqlite_busy_error(&e) {
+                                        init_retry_count += 1;
+                                        if init_retry_count >= max_init_retries {
+                                            return Err(DbError::DatabaseError(e));
+                                        }
+                                        continue;
+                                    }
+                                    return Err(DbError::DatabaseError(e));
+                                }
+                            };
+
+                            if cache_table_exists {
+                                println!("Cache table exists after constraint error, proceeding with connection");
+                                return Ok(db_connection);
+                            } else {
+                                println!("Cache table doesn't exist after constraint error, retrying entire initialization");
+                                init_retry_count += 1;
+                                if init_retry_count >= max_init_retries {
+                                    return Err(DbError::DatabaseError(sqlx_error));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // For any other error, retry the whole process
+                println!("Error during migration: {:?}", sqlx_error);
+                init_retry_count += 1;
+                if init_retry_count >= max_init_retries {
+                    return Err(DbError::DatabaseError(sqlx_error));
+                }
+                continue;
+            }
+        }
     }
 }
 
@@ -115,23 +210,125 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
     }
 
     // Check if the database exists, if not create it
-    let db_url = format!("sqlite:{}", db_path);
-    if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
+    // Use a basic URL first to check existence and create the database
+    let basic_db_url = format!("sqlite:{}", db_path);
+
+    // Add retry logic for database creation to handle concurrent access
+    let max_retries = 10;
+    let mut retry_count = 0;
+
+    while !Sqlite::database_exists(&basic_db_url).await.unwrap_or(false) {
         println!("Database does not exist, creating it");
-        Sqlite::create_database(&db_url).await?;
+        match Sqlite::create_database(&basic_db_url).await {
+            Ok(_) => {
+                println!("Database created successfully");
+                break;
+            },
+            Err(e) => {
+                // If it's a busy/locked error, retry
+                if is_sqlite_busy_error(&e) {
+                    retry_count += 1;
+                    if retry_count >= max_retries {
+                        println!("Max retries reached while creating database");
+                        return Err(DbError::DatabaseError(e));
+                    }
+                    println!("Database is busy/locked during creation, retrying in 10ms (attempt {}/{})", 
+                             retry_count, max_retries);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                    // Check again if the database exists (another process might have created it)
+                    if Sqlite::database_exists(&basic_db_url).await.unwrap_or(false) {
+                        println!("Database now exists, another process must have created it");
+                        break;
+                    }
+                } else {
+                    // For any other error, return it
+                    return Err(DbError::DatabaseError(e));
+                }
+            }
+        }
     }
 
+    // Now use a URL with pragmas optimized for concurrent access
+    // SQLx uses a different format for SQLite connection URLs with pragmas
+    let db_url = format!("sqlite:{}", db_path);
+
     // Set up database connection pool with 10-second timeout
-    let db_pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .connect(&db_url).await
-        .map_err(|e| {
-            println!("Error creating database connection pool: {}", e);
-            DbError::PoolError(e.to_string())
-        })?;
+    // Use more connections to allow concurrent access from multiple instances
+    // Add retry logic for connection to handle concurrent access
+    let max_retries = 10;
+    let mut retry_count = 0;
+    let mut db_pool = None;
+
+    while db_pool.is_none() && retry_count < max_retries {
+        match SqlitePoolOptions::new()
+            .max_connections(5) // Increased from 1 to 5 to allow concurrent access
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(&db_url).await
+        {
+            Ok(pool) => {
+                db_pool = Some(pool);
+            },
+            Err(e) => {
+                // If it's a busy/locked error, retry
+                if is_sqlite_busy_error(&e) {
+                    retry_count += 1;
+                    println!("Database is busy/locked during connection, retrying in 10ms (attempt {}/{})", 
+                             retry_count, max_retries);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                } else {
+                    // For any other error, return it
+                    println!("Error creating database connection pool: {}", e);
+                    return Err(DbError::PoolError(e.to_string()));
+                }
+            }
+        }
+    }
+
+    // If we've exhausted retries and still don't have a connection, return an error
+    let db_pool = db_pool.ok_or_else(|| {
+        let msg = format!("Failed to connect to database after {} retries", max_retries);
+        println!("{}", msg);
+        DbError::PoolError(msg)
+    })?;
 
     println!("Database connection pool created successfully");
+
+    // Configure SQLite for better concurrent access
+    // Execute pragmas to set journal mode to WAL and other optimizations
+    sqlx::query("PRAGMA journal_mode = WAL;")
+        .execute(&db_pool)
+        .await
+        .map_err(|e| {
+            println!("Error setting journal_mode pragma: {}", e);
+            DbError::DatabaseError(e)
+        })?;
+
+    sqlx::query("PRAGMA synchronous = NORMAL;")
+        .execute(&db_pool)
+        .await
+        .map_err(|e| {
+            println!("Error setting synchronous pragma: {}", e);
+            DbError::DatabaseError(e)
+        })?;
+
+    sqlx::query("PRAGMA cache_size = 1000;")
+        .execute(&db_pool)
+        .await
+        .map_err(|e| {
+            println!("Error setting cache_size pragma: {}", e);
+            DbError::DatabaseError(e)
+        })?;
+
+    sqlx::query("PRAGMA busy_timeout = 5000;")
+        .execute(&db_pool)
+        .await
+        .map_err(|e| {
+            println!("Error setting busy_timeout pragma: {}", e);
+            DbError::DatabaseError(e)
+        })?;
+
+    println!("SQLite configured for concurrent access");
 
     Ok(db_pool)
 }

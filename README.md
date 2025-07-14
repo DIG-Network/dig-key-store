@@ -28,22 +28,22 @@ async function example() {
     dbPath: './cache.db',     // Path to SQLite database file
     cleanupIntervalMs: 60000  // Cleanup interval in milliseconds (1 minute)
   });
-  
+
   // Set a value
   const key = 'user:123';
   const value = Buffer.from(JSON.stringify({ name: 'John', age: 30 }));
   await cache.set(key, value);
-  
+
   // Set a value with TTL (time-to-live)
   await cache.set('session:456', Buffer.from('session-data'), 3600000); // 1 hour TTL
-  
+
   // Get a value
   const result = await cache.get(key);
   if (result) {
     const userData = JSON.parse(result.toString());
     console.log(userData); // { name: 'John', age: 30 }
   }
-  
+
   // Delete a value
   await cache.delete(key);
 }
@@ -111,6 +111,18 @@ Deletes a value from the cache.
 - Node.js 14+
 - Rust 1.56+
 - SQLite development libraries
+
+### Setup
+
+1. Install sqlx-cli with cargo:
+```bash
+cargo install sqlx-cli
+```
+
+2. Install npm dependencies:
+```bash
+npm install
+```
 
 ### Building
 

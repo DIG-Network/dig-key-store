@@ -6,7 +6,6 @@ use std::result::Result;
 use sqlx::{Sqlite, Pool};
 use lru::LruCache;
 use thiserror::Error;
-use tokio::time;
 
 // Import database queries
 use crate::database::{
@@ -21,9 +20,10 @@ use crate::database::{
 };
 
 mod database;
+#[cfg(feature = "napi-bindings")]
 pub mod napi;
 
-static MAX_LRU_CACHE_ITEMS: usize = 1000;
+static MAX_LRU_CACHE_ITEMS: usize = 1_000_000;
 
 /// Checks if the given SQLx error is an SQLite "busy" or "locked" error
 pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
@@ -45,8 +45,8 @@ where
     T: Send,
 {
     // Use a constant, minimal delay for high performance
-    let retry_delay_ms = 10; // Fixed 10ms delay between retries
-    let max_retries = 10;
+    let retry_delay_ms = 5; // Fixed 5ms delay between retries
+    let max_retries = 1000;
     let mut retry_count = 0;
 
     loop {
@@ -69,8 +69,6 @@ where
         }
     }
 }
-
-// No schema or models needed with sqlx
 
 #[derive(Debug, Error)]
 pub enum CacheError {
@@ -125,7 +123,7 @@ pub struct CacheOptions {
 /// #[tokio::main]
 /// async fn main() {
 ///     // Create a cache with default options
-///     let options = CacheOptions {max_memory_mb: 100, db_path: "tests/db/comment_code_test_cache.sqlite".to_string()};
+///     let options = CacheOptions {max_memory_mb: 100, db_path: "tests/db/cargo_unit_tests.sqlite".to_string()};
 ///     let cache = Cache::new(options).await.expect("Failed to create cache");
 ///
 ///     // Set a value
@@ -177,12 +175,14 @@ impl Cache {
         // Initialize memory usage tracker
         let current_memory_usage = Arc::new(Mutex::new(0));
 
-        Ok(Self {
+        let cache = Self {
             memory_cache,
             db_pool,
             options,
             current_memory_usage,
-        })
+        };
+
+        Ok(cache)
     }
 
     pub async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
@@ -419,7 +419,72 @@ impl Cache {
 
         Ok(())
     }
+
+    /// Cleans up expired keys from the database
+    /// 
+    /// This method can be called manually to remove expired keys from both the memory cache and the database.
+    /// It returns the number of keys that were removed.
+    pub async fn cleanup_expired_keys(&self) -> Result<usize, CacheError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        let db_pool = self.db_pool.clone();
+
+        // Get all expired keys
+        let expired_keys = retry_on_busy(move || {
+            let db_pool = db_pool.clone();
+            let now = now;
+            async move {
+                get_expired_keys(&db_pool, now).await
+            }
+        }).await?;
+
+        if expired_keys.is_empty() {
+            return Ok(0);
+        }
+
+        println!("Found {} expired keys to clean up", expired_keys.len());
+
+        // Extract key strings from CacheKey structs
+        let key_strings: Vec<String> = expired_keys.into_iter()
+            .map(|k| k.cache_key)
+            .collect();
+
+        // Remove expired keys from memory cache
+        {
+            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+
+            for key in &key_strings {
+                if let Some(value) = memory_cache.pop(key) {
+                    // Subtract the size of the key and value from memory usage
+                    let size = value.len() + key.len();
+                    *memory_usage = memory_usage.saturating_sub(size);
+                    println!("Removed expired key '{}' from memory cache during cleanup", key);
+                }
+            }
+        }
+
+        // Delete expired keys from database in batch
+        let db_pool = self.db_pool.clone();
+        let count = key_strings.len();
+
+        retry_on_busy(move || {
+            let db_pool = db_pool.clone();
+            let key_strings = key_strings.clone();
+            async move {
+                delete_keys_batch(&db_pool, &key_strings).await
+            }
+        }).await?;
+
+        println!("Cleaned up {} expired keys", count);
+
+        Ok(count)
+    }
+
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -432,15 +497,12 @@ mod tests {
         println!("UNIT TEST: Testing cleanup of expired entries");
 
         // Create a test cache
-        let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-        // Replace :: with _ to avoid issues with file paths
-        let safe_test_name = test_name.replace("::", "_");
-        let db_path = format!("tests/db/test_cache_unit_{}.sqlite", safe_test_name);
+        let db_path = "tests/db/cargo_unit_tests.sqlite".to_string();
         println!("Creating test cache with database path: {}", db_path);
 
-        // Ensure the tests/db directory exists
-        std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
-        println!("Created tests/db directory if it didn't exist");
+        // Ensure the db directory exists
+        std::fs::create_dir_all("db").expect("Failed to create db directory");
+        println!("Created db directory if it didn't exist");
 
         // Remove the database file if it exists
         if std::path::Path::new(&db_path).exists() {
@@ -457,7 +519,7 @@ mod tests {
         let cache = Cache::new(options).await.expect("Failed to create cache for test");
         println!("Successfully created cache instance");
 
-        let key = "test_key";
+        let key = "lib_rs_test_cleanup_expired_entries";
         let value = b"test_value";
 
         // Set with 1 second TTL
@@ -493,5 +555,68 @@ mod tests {
 
         // If we get here, the test fails
         panic!("Value did not expire after multiple attempts");
+    }
+
+    #[tokio::test]
+    async fn test_manual_cleanup() {
+        println!("UNIT TEST: Testing manual cleanup");
+
+        // Create a test cache
+        let db_path = "tests/db/cargo_unit_tests_manual_cleanup.sqlite".to_string();
+        println!("Creating test cache with database path: {}", db_path);
+
+        // Ensure the db directory exists
+        std::fs::create_dir_all("db").expect("Failed to create db directory");
+        println!("Created db directory if it didn't exist");
+
+        // Remove the database file if it exists
+        if std::path::Path::new(&db_path).exists() {
+            std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
+            println!("Removed existing database file");
+        }
+
+        // Create a cache
+        let options = CacheOptions {
+            max_memory_mb: 10,
+            db_path,
+        };
+
+        // Create a new cache instance
+        let cache = Cache::new(options).await.expect("Failed to create cache for test");
+        println!("Successfully created cache instance");
+
+        // Add several keys with short TTLs
+        for i in 0..5 {
+            let key = format!("manual_cleanup_test_key_{}", i);
+            let value = format!("value_{}", i).into_bytes();
+
+            // Set with 2 second TTL
+            println!("Setting key '{}' with 2 second TTL", key);
+            cache.set(&key, &value, Some(Duration::from_secs(2))).await.expect("Failed to set key in test");
+
+            // Verify it was set correctly
+            let result = cache.get(&key).await.expect("Failed to get key in test");
+            assert_eq!(result, Some(value.clone()));
+        }
+
+        // Wait for keys to expire (3 seconds should be enough)
+        println!("Waiting for 3 seconds to allow keys to expire...");
+        sleep(Duration::from_secs(3)).await;
+        println!("Wait complete, keys should now be expired");
+
+        // Manually run the cleanup
+        println!("Running manual cleanup");
+        let cleaned_count = cache.cleanup_expired_keys().await.expect("Failed to run cleanup");
+        println!("Cleaned up {} keys", cleaned_count);
+        assert_eq!(cleaned_count, 5, "Should have cleaned up 5 keys");
+
+        // Verify all keys have been removed
+        for i in 0..5 {
+            let key = format!("manual_cleanup_test_key_{}", i);
+            let result = cache.get(&key).await.expect("Failed to get key in test");
+            assert_eq!(result, None, "Key '{}' should have been removed by manual cleanup", key);
+        }
+
+        println!("SUCCESS: All keys were properly removed by manual cleanup");
     }
 }

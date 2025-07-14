@@ -1,19 +1,110 @@
+use std::string::ToString;
 use std::time::Duration;
+use std::fs;
+use std::path::Path;
+use std::sync::Once;
 use dig_key_store::{Cache, CacheOptions};
 use tokio::time::sleep;
+
+static TESTS_RS_DB_PATH: &str = "tests/db/cargo_integration_tests.sqlite";
+static ONCE: Once = Once::new();
+
+// Function to set up the test database once
+pub fn clean_db_files_once() {
+    // Use a static Once to ensure we only clean up once per test run
+    ONCE.call_once(|| {
+        println!("\nCleaning up database files before tests");
+        let db_path = TESTS_RS_DB_PATH;
+        let wal_path_str = format!("{}-wal", TESTS_RS_DB_PATH);
+        let shm_path_str = format!("{}-shm", TESTS_RS_DB_PATH);
+
+        // Ensure the tests/db directory exists
+        if let Some(parent) = Path::new(db_path).parent() {
+            if !parent.exists() {
+                println!("Creating directory for test database: {:?}", parent);
+                fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    println!("Warning: Failed to create directory for test database: {}", e);
+                });
+            }
+        }
+
+        // Delete the main database file if it exists
+        let db_path = Path::new(db_path);
+        if db_path.exists() {
+            println!("Deleting database file: {:?}", db_path);
+            // Try multiple times with small delays to handle potential file locks
+            for attempt in 1..=5 {
+                match fs::remove_file(db_path) {
+                    Ok(_) => {
+                        println!("Successfully deleted database file");
+                        break;
+                    },
+                    Err(e) => {
+                        println!("Warning: Failed to delete database file (attempt {}/5): {}", attempt, e);
+                        if attempt < 5 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delete the WAL file if it exists
+        let wal_path = Path::new(&wal_path_str);
+        if wal_path.exists() {
+            println!("Deleting WAL file: {:?}", wal_path);
+            for attempt in 1..=5 {
+                match fs::remove_file(wal_path) {
+                    Ok(_) => {
+                        println!("Successfully deleted WAL file");
+                        break;
+                    },
+                    Err(e) => {
+                        println!("Warning: Failed to delete WAL file (attempt {}/5): {}", attempt, e);
+                        if attempt < 5 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delete the SHM file if it exists
+        let shm_path = Path::new(&shm_path_str);
+        if shm_path.exists() {
+            println!("Deleting SHM file: {:?}", shm_path);
+            for attempt in 1..=5 {
+                match fs::remove_file(shm_path) {
+                    Ok(_) => {
+                        println!("Successfully deleted SHM file");
+                        break;
+                    },
+                    Err(e) => {
+                        println!("Warning: Failed to delete SHM file (attempt {}/5): {}", attempt, e);
+                        if attempt < 5 {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("Database cleanup completed");
+    });
+}
 
 async fn create_test_cache() -> Cache {
     // Get the current test name for logging purposes
     let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
     println!("Creating cache for test: {}", test_name);
 
-    // Use a single database file for all tests
-    let db_path = "tests/db/cargo_tests.sqlite".to_string();
+    // Use a single database file for all integration tests
+    let db_path = TESTS_RS_DB_PATH.to_string();
     println!("Using database path: {}", db_path);
 
-    // Ensure the tests/db directory exists
-    std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
-    println!("Created tests/db directory if it didn't exist");
+    // Ensure the db directory exists
+    fs::create_dir_all("db").expect("Failed to create db directory");
+    println!("Created db directory if it didn't exist");
 
     let options = CacheOptions {
         max_memory_mb: 10,
@@ -35,8 +126,11 @@ async fn create_test_cache() -> Cache {
 async fn test_set_get() {
     println!("\nINTEGRATION TEST: Testing set and get operations");
 
+    // Set up test database once
+    clean_db_files_once();
+
     let cache = create_test_cache().await;
-    let key = "test_set_get_basic_operation";
+    let key = "tests_rs_test_set_get_basic_operation";
     let value = b"test_value";
 
     println!("Setting key '{}' with no expiration", key);
@@ -53,8 +147,11 @@ async fn test_set_get() {
 async fn test_delete() {
     println!("\nINTEGRATION TEST: Testing delete operation");
 
+    // Set up test database once
+    clean_db_files_once();
+
     let cache = create_test_cache().await;
-    let key = "test_delete_key_removal";
+    let key = "tests_rs_test_delete_key_removal";
     let value = b"test_value";
 
     println!("Setting key '{}' with no expiration", key);
@@ -74,8 +171,11 @@ async fn test_delete() {
 async fn test_expiration() {
     println!("\nINTEGRATION TEST: Testing key expiration");
 
+    // Set up test database once
+    clean_db_files_once();
+
     let cache = create_test_cache().await;
-    let key = "test_expiration_ttl_check";
+    let key = "tests_rs_test_expiration_ttl_check";
     let value = b"test_value";
 
     // Set with 1 second TTL
@@ -117,8 +217,11 @@ async fn test_expiration() {
 async fn test_memory_cache_ttl_eviction() {
     println!("\nINTEGRATION TEST: Testing TTL eviction from memory cache");
 
+    // Set up test database once
+    clean_db_files_once();
+
     let cache = create_test_cache().await;
-    let key = "test_memory_cache_ttl_eviction_check";
+    let key = "tests_rs_test_memory_cache_ttl_eviction_check";
     let value = b"memory_cache_value";
 
     // Set with 1 second TTL
@@ -153,17 +256,16 @@ async fn test_memory_cache_ttl_eviction() {
 async fn test_memory_pressure_eviction() {
     println!("\nINTEGRATION TEST: Testing memory pressure eviction");
 
+    // Set up test database once
+    clean_db_files_once();
+
     // Create a cache with a small memory limit to trigger eviction
-    let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-    let db_path = format!("tests/db/memory_pressure_test_{}.sqlite", test_name.replace("::", "_"));
+    let db_path = TESTS_RS_DB_PATH.to_string();
 
-    // Ensure the tests/db directory exists
-    std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
+    // Ensure the db directory exists
+    std::fs::create_dir_all("db").expect("Failed to create db directory");
 
-    // Remove the database file if it exists
-    if std::path::Path::new(&db_path).exists() {
-        std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
-    }
+    // We don't remove the database file as we want to reuse it across tests
 
     // Create a cache with a very small memory limit (1MB)
     let options = CacheOptions {
@@ -175,7 +277,7 @@ async fn test_memory_pressure_eviction() {
     println!("Successfully created cache instance with 1MB memory limit");
 
     // First key that we'll check if it gets evicted
-    let first_key = "first_key_for_eviction_test";
+    let first_key = "tests_rs_test_memory_pressure_eviction_first_key";
     let first_value = vec![0u8; 100_000]; // 100KB value
 
     println!("Setting first key '{}' with 100KB value", first_key);
@@ -189,7 +291,7 @@ async fn test_memory_pressure_eviction() {
     // Add many more keys to trigger memory pressure
     println!("Adding many more keys to trigger memory pressure");
     for i in 0..20 {
-        let key = format!("memory_pressure_key_{}", i);
+        let key = format!("tests_rs_test_memory_pressure_eviction_key_{}", i);
         let value = vec![i as u8; 100_000]; // 100KB value each
         cache.set(&key, &value, None).await.unwrap();
 
@@ -201,7 +303,7 @@ async fn test_memory_pressure_eviction() {
 
     // Add one more large key to definitely trigger eviction
     println!("Adding one more large key to trigger eviction");
-    let large_key = "large_key_for_eviction";
+    let large_key = "tests_rs_test_memory_pressure_eviction_large_key";
     let large_value = vec![0u8; 500_000]; // 500KB value
     cache.set(large_key, &large_value, None).await.unwrap();
 
@@ -215,7 +317,7 @@ async fn test_memory_pressure_eviction() {
     // We can't know exactly which keys were evicted, but we can check that they're still accessible
     println!("Checking that middle keys are still accessible");
     for i in 0..20 {
-        let key = format!("memory_pressure_key_{}", i);
+        let key = format!("tests_rs_test_memory_pressure_eviction_key_{}", i);
         let expected_value = vec![i as u8; 100_000];
         let result = cache.get(&key).await.unwrap();
         assert_eq!(result, Some(expected_value), "Key {} should still be accessible from database", key);
@@ -227,18 +329,17 @@ async fn test_memory_pressure_eviction() {
 async fn test_cross_layer_synchronization() {
     println!("\nINTEGRATION TEST: Testing cross-layer synchronization");
 
+    // Set up test database once
+    clean_db_files_once();
+
     // Create two separate cache instances that point to the same database
     // This simulates two processes accessing the same cache
-    let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-    let db_path = format!("tests/db/cross_layer_sync_test_{}.sqlite", test_name.replace("::", "_"));
+    let db_path = TESTS_RS_DB_PATH.to_string();
 
-    // Ensure the tests/db directory exists
-    std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
+    // Ensure the db directory exists
+    std::fs::create_dir_all("db").expect("Failed to create db directory");
 
-    // Remove the database file if it exists
-    if std::path::Path::new(&db_path).exists() {
-        std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
-    }
+    // We don't remove the database file as we want to reuse it across tests
 
     // Create the first cache instance
     let options1 = CacheOptions {
@@ -250,7 +351,7 @@ async fn test_cross_layer_synchronization() {
     println!("Successfully created first cache instance");
 
     // Set a key in the first cache
-    let key = "cross_layer_sync_key";
+    let key = "tests_rs_test_cross_layer_synchronization_key";
     let value1 = b"value_from_cache1";
 
     println!("Setting key '{}' in first cache", key);
@@ -302,17 +403,16 @@ async fn test_cross_layer_synchronization() {
 async fn test_simulated_concurrent_access() {
     println!("\nINTEGRATION TEST: Testing simulated concurrent access patterns");
 
+    // Set up test database once
+    clean_db_files_once();
+
     // Create a shared database for all cache instances
-    let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-    let db_path = format!("tests/db/concurrent_access_test_{}.sqlite", test_name.replace("::", "_"));
+    let db_path = TESTS_RS_DB_PATH.to_string();
 
-    // Ensure the tests/db directory exists
-    std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
+    // Ensure the db directory exists
+    std::fs::create_dir_all("db").expect("Failed to create db directory");
 
-    // Remove the database file if it exists
-    if std::path::Path::new(&db_path).exists() {
-        std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
-    }
+    // We don't remove the database file as we want to reuse it across tests
 
     // Number of simulated concurrent clients
     let num_clients = 5;
@@ -340,7 +440,7 @@ async fn test_simulated_concurrent_access() {
     for op_id in 0..ops_per_client {
         // Each client performs an operation
         for client_id in 0..num_clients {
-            let key = format!("concurrent_key_{}_{}", client_id, op_id);
+            let key = format!("tests_rs_test_simulated_concurrent_access_key_{}_{}", client_id, op_id);
             let value = format!("value_{}_{}", client_id, op_id).into_bytes();
 
             // Set the key
@@ -353,7 +453,7 @@ async fn test_simulated_concurrent_access() {
             // Occasionally read keys from other clients
             if op_id % 10 == 0 && client_id > 0 {
                 let other_client_id = (client_id - 1) % num_clients;
-                let other_key = format!("concurrent_key_{}_{}", other_client_id, op_id);
+                let other_key = format!("tests_rs_test_simulated_concurrent_access_key_{}_{}", other_client_id, op_id);
 
                 // Try to get the key from another client (it should exist since we're processing sequentially)
                 let result = caches[client_id].get(&other_key).await.unwrap();
@@ -365,7 +465,7 @@ async fn test_simulated_concurrent_access() {
 
             // Occasionally delete keys
             if op_id % 20 == 0 && op_id > 0 {
-                let delete_key = format!("concurrent_key_{}_{}", client_id, op_id - 10);
+                let delete_key = format!("tests_rs_test_simulated_concurrent_access_key_{}_{}", client_id, op_id - 10);
                 caches[client_id].delete(&delete_key).await.unwrap();
 
                 // Verify deletion
@@ -390,17 +490,16 @@ async fn test_simulated_concurrent_access() {
 async fn test_memory_limit_enforcement() {
     println!("\nINTEGRATION TEST: Testing memory limit enforcement");
 
+    // Set up test database once
+    clean_db_files_once();
+
     // Create a cache with a very small memory limit
-    let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
-    let db_path = format!("tests/db/memory_limit_test_{}.sqlite", test_name.replace("::", "_"));
+    let db_path = TESTS_RS_DB_PATH.to_string();
 
-    // Ensure the tests/db directory exists
-    std::fs::create_dir_all("tests/db").expect("Failed to create tests/db directory");
+    // Ensure the db directory exists
+    std::fs::create_dir_all("db").expect("Failed to create db directory");
 
-    // Remove the database file if it exists
-    if std::path::Path::new(&db_path).exists() {
-        std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
-    }
+    // We don't remove the database file as we want to reuse it across tests
 
     // Create a cache with a very small memory limit (0.5MB)
     let options = CacheOptions {
@@ -416,20 +515,20 @@ async fn test_memory_limit_enforcement() {
 
     // Start with small keys
     for i in 0..10 {
-        let key = format!("small_key_{}", i);
+        let key = format!("tests_rs_test_memory_limit_enforcement_small_key_{}", i);
         let value = vec![i as u8; 10_000]; // 10KB each
         cache.set(&key, &value, None).await.unwrap();
     }
 
     // Add medium-sized keys
     for i in 0..5 {
-        let key = format!("medium_key_{}", i);
+        let key = format!("tests_rs_test_memory_limit_enforcement_medium_key_{}", i);
         let value = vec![i as u8; 100_000]; // 100KB each
         cache.set(&key, &value, None).await.unwrap();
     }
 
     // Add one large key that should trigger eviction
-    let large_key = "large_key";
+    let large_key = "tests_rs_test_memory_limit_enforcement_large_key";
     let large_value = vec![0u8; 500_000]; // 500KB
     println!("Adding large key that should trigger eviction");
     cache.set(large_key, &large_value, None).await.unwrap();
@@ -440,7 +539,7 @@ async fn test_memory_limit_enforcement() {
     println!("Large key is in the cache as expected");
 
     // Add another large key to definitely trigger more evictions
-    let another_large_key = "another_large_key";
+    let another_large_key = "tests_rs_test_memory_limit_enforcement_another_large_key";
     let another_large_value = vec![1u8; 500_000]; // Another 500KB
     println!("Adding another large key to trigger more evictions");
     cache.set(another_large_key, &another_large_value, None).await.unwrap();
@@ -459,7 +558,7 @@ async fn test_memory_limit_enforcement() {
 
     // Check small keys
     for i in 0..10 {
-        let key = format!("small_key_{}", i);
+        let key = format!("tests_rs_test_memory_limit_enforcement_small_key_{}", i);
         let expected_value = vec![i as u8; 10_000];
         let result = cache.get(&key).await.unwrap();
         assert_eq!(result, Some(expected_value), "Small key {} should still be accessible", i);
@@ -467,7 +566,7 @@ async fn test_memory_limit_enforcement() {
 
     // Check medium keys
     for i in 0..5 {
-        let key = format!("medium_key_{}", i);
+        let key = format!("tests_rs_test_memory_limit_enforcement_medium_key_{}", i);
         let expected_value = vec![i as u8; 100_000];
         let result = cache.get(&key).await.unwrap();
         assert_eq!(result, Some(expected_value), "Medium key {} should still be accessible", i);

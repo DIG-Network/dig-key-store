@@ -1,8 +1,12 @@
 [package]
 name = "dig-key-store"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A dual-layer caching library with SQLite backend and in-memory LRU cache"
+
+[features]
+default = []
+napi-bindings = ["napi", "napi-derive", "napi-build"]
 
 [dependencies]
 sqlx = { version = "0.7", features = ["runtime-tokio", "tls-rustls", "sqlite", "migrate", "macros"] }
@@ -10,11 +14,11 @@ lru = "0.10.0"
 thiserror = "1.0.40"
 tokio = { version = "1.28.0", features = ["full"] }
 # NAPI dependencies
-napi = { version = "2.12.2", default-features = false, features = ["napi6", "async"] }
-napi-derive = "2.12.2"
+napi = { version = "2.12.2", default-features = false, features = ["napi6", "async"], optional = true }
+napi-derive = { version = "2.12.2", optional = true }
 
 [build-dependencies]
-napi-build = "2.0.1"
+napi-build = { version = "2.0.1", optional = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
