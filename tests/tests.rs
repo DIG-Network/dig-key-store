@@ -102,10 +102,6 @@ async fn create_test_cache() -> Cache {
     let db_path = TESTS_RS_DB_PATH.to_string();
     println!("Using database path: {}", db_path);
 
-    // Ensure the db directory exists
-    fs::create_dir_all("db").expect("Failed to create db directory");
-    println!("Created db directory if it didn't exist");
-
     let options = CacheOptions {
         max_memory_mb: 10,
         db_path
@@ -262,9 +258,6 @@ async fn test_memory_pressure_eviction() {
     // Create a cache with a small memory limit to trigger eviction
     let db_path = TESTS_RS_DB_PATH.to_string();
 
-    // Ensure the db directory exists
-    std::fs::create_dir_all("db").expect("Failed to create db directory");
-
     // We don't remove the database file as we want to reuse it across tests
 
     // Create a cache with a very small memory limit (1MB)
@@ -336,9 +329,6 @@ async fn test_cross_layer_synchronization() {
     // This simulates two processes accessing the same cache
     let db_path = TESTS_RS_DB_PATH.to_string();
 
-    // Ensure the db directory exists
-    std::fs::create_dir_all("db").expect("Failed to create db directory");
-
     // We don't remove the database file as we want to reuse it across tests
 
     // Create the first cache instance
@@ -408,9 +398,6 @@ async fn test_simulated_concurrent_access() {
 
     // Create a shared database for all cache instances
     let db_path = TESTS_RS_DB_PATH.to_string();
-
-    // Ensure the db directory exists
-    std::fs::create_dir_all("db").expect("Failed to create db directory");
 
     // We don't remove the database file as we want to reuse it across tests
 
@@ -495,9 +482,6 @@ async fn test_memory_limit_enforcement() {
 
     // Create a cache with a very small memory limit
     let db_path = TESTS_RS_DB_PATH.to_string();
-
-    // Ensure the db directory exists
-    std::fs::create_dir_all("db").expect("Failed to create db directory");
 
     // We don't remove the database file as we want to reuse it across tests
 

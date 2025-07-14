@@ -500,10 +500,6 @@ mod tests {
         let db_path = "tests/db/cargo_unit_tests.sqlite".to_string();
         println!("Creating test cache with database path: {}", db_path);
 
-        // Ensure the db directory exists
-        std::fs::create_dir_all("db").expect("Failed to create db directory");
-        println!("Created db directory if it didn't exist");
-
         // Remove the database file if it exists
         if std::path::Path::new(&db_path).exists() {
             std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
@@ -564,10 +560,6 @@ mod tests {
         // Create a test cache
         let db_path = "tests/db/cargo_unit_tests_manual_cleanup.sqlite".to_string();
         println!("Creating test cache with database path: {}", db_path);
-
-        // Ensure the db directory exists
-        std::fs::create_dir_all("db").expect("Failed to create db directory");
-        println!("Created db directory if it didn't exist");
 
         // Remove the database file if it exists
         if std::path::Path::new(&db_path).exists() {
