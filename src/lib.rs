@@ -22,7 +22,6 @@ use crate::database::{
 mod database;
 #[cfg(feature = "napi-bindings")]
 pub mod napi;
-
 static MAX_LRU_CACHE_ITEMS: usize = 1_000_000;
 
 /// Checks if the given SQLx error is an SQLite "busy" or "locked" error

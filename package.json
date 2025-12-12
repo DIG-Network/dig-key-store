@@ -1,43 +1,45 @@
 {
   "name": "@dignetwork/dig-key-value-store",
   "version": "0.1.0",
-  "main": "index.js",
+  "main": "index.cjs",
   "types": "index.d.ts",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/DIG-Network/dig-key-value-store"
-  },
-  "napi": {
-    "name": "dig-key-value-store",
-    "triples": {
-      "additional": [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-pc-windows-msvc"
-      ]
-    }
-  },
-  "license": "MIT",
-  "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
-    "@types/node": "^24.0.10",
-    "ava": "^6.0.1"
-  },
-  "ava": {
-    "timeout": "3m"
-  },
   "engines": {
     "node": ">= 22.17"
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build -o napi-build --features napi-bindings --platform --release --js index.js",
+    "build:debug": "napi build -o napi-build --features napi-bindings --platform --js index.cjs",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "ava",
+    "test": "tsc tests/tests.mts && ava",
     "universal": "napi universal",
     "version": "napi version"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DIG-Network/dig-key-value-store"
+  },
+  "napi": {
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@napi-rs/cli": "^3.1.5",
+    "@types/node": "^24.0.10",
+    "ava": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "ava": {
+    "timeout": "3m",
+    "files": [
+      "tests/**/*.mjs"
+    ]
   }
 }

@@ -1,19 +1,7 @@
-const test = require('ava');
-const fs = require('fs');
-const fsPromises = fs.promises;
-const path = require('path');
-
-// Attempt to load real JsCache from your index.js
-let JsCache;
-try {
-  console.log('Attempting to load JsCache from index.js');
-  const index = require('../index');
-  JsCache = index.JsCache;
-  console.log('Successfully loaded JsCache from index.js');
-} catch (error) {
-  console.error('Error loading JsCache from index.js:', error);
-  throw error; // Fail immediately if JsCache cannot be loaded
-}
+import test from 'ava';
+import * as fs from 'fs';
+import * as path from 'path';
+import {JsCache} from "../napi-build/index.js";
 
 const JS_TEST_DB_PATH = path.join(process.cwd(), 'tests', 'db', 'js_integration_tests.sqlite');
 
@@ -21,27 +9,20 @@ async function cleanDbFiles() {
   console.log('\nCleaning up database files before tests');
 
   try {
-    await fsPromises.mkdir(path.dirname(JS_TEST_DB_PATH), { recursive: true });
+    await fs.promises.mkdir(path.dirname(JS_TEST_DB_PATH), { recursive: true });
   } catch {}
 
   for (const suffix of ['', '-wal', '-shm']) {
     try {
-      await fsPromises.unlink(`${JS_TEST_DB_PATH}${suffix}`);
+      await fs.promises.unlink(`${JS_TEST_DB_PATH}${suffix}`);
       console.log(`Deleted: ${JS_TEST_DB_PATH}${suffix}`);
     } catch (err) {
-      if (err.code !== 'ENOENT') console.log(`Warning: Failed to delete ${JS_TEST_DB_PATH}${suffix}: ${err.message}`);
+      const any_err = err as any;
+      if (any_err?.code !== 'ENOENT') console.log(`Warning: Failed to delete ${JS_TEST_DB_PATH}${suffix}: ${any_err.message}`);
     }
   }
 
   console.log('Database cleanup completed');
-}
-
-async function createTestCache(options = {}) {
-  const cache = new JsCache({
-    maxMemoryMb: options.maxMemoryMb || 10,
-    dbPath: options.dbPath || JS_TEST_DB_PATH,
-  });
-  return cache;
 }
 
 test.before(async () => {
@@ -49,7 +30,10 @@ test.before(async () => {
 });
 
 test('JsCache - set and get', async (t) => {
-  const cache = await createTestCache();
+  const cache = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
   const key = 'js_test_set_get';
   const value = Buffer.from('test_value');
 
@@ -61,7 +45,10 @@ test('JsCache - set and get', async (t) => {
 });
 
 test('JsCache - delete', async (t) => {
-  const cache = await createTestCache();
+  const cache = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
   const key = 'js_test_delete';
   const value = Buffer.from('test_value');
 
@@ -73,7 +60,10 @@ test('JsCache - delete', async (t) => {
 });
 
 test('JsCache - expiration', async (t) => {
-  const cache = await createTestCache();
+  const cache = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
   const key = 'js_test_expiration';
   const value = Buffer.from('test_value');
 
@@ -88,7 +78,10 @@ test('JsCache - expiration', async (t) => {
 });
 
 test('JsCache - memory cache TTL eviction', async (t) => {
-  const cache = await createTestCache();
+  const cache = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
   const key = 'js_test_ttl_eviction';
   const value = Buffer.from('memory_value');
 
@@ -102,7 +95,10 @@ test('JsCache - memory cache TTL eviction', async (t) => {
 });
 
 test('JsCache - memory pressure eviction', async (t) => {
-  const cache = await createTestCache({ maxMemoryMb: 1 });
+  const cache = await new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
   const firstKey = 'js_test_memory_pressure_first';
   const firstValue = Buffer.alloc(100000).fill(1);
 
@@ -122,8 +118,14 @@ test('JsCache - memory pressure eviction', async (t) => {
 });
 
 test('JsCache - cross layer synchronization', async (t) => {
-  const cache1 = await createTestCache();
-  const cache2 = await createTestCache();
+  const cache1 = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
+  const cache2 = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
 
   const key = 'js_test_cross_layer';
   const value1 = Buffer.from('value1');
@@ -143,7 +145,10 @@ test('JsCache - simulated concurrent access', async (t) => {
 
   const caches = [];
   for (let i = 0; i < numClients; i++) {
-    caches.push(await createTestCache());
+    caches.push(new JsCache({
+      maxMemoryMb: 10,
+      dbPath: JS_TEST_DB_PATH,
+    }));
   }
 
   for (let opId = 0; opId < opsPerClient; opId++) {
@@ -165,7 +170,10 @@ test('JsCache - simulated concurrent access', async (t) => {
 });
 
 test('JsCache - memory limit enforcement', async (t) => {
-  const cache = await createTestCache({ maxMemoryMb: 1 });
+  const cache = new JsCache({
+    maxMemoryMb: 10,
+    dbPath: JS_TEST_DB_PATH,
+  });
 
   for (let i = 0; i < 10; i++) {
     const key = `js_memory_limit_key_${i}`;
