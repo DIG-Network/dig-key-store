@@ -1,9 +1,9 @@
-use std::string::ToString;
-use std::time::Duration;
+use dig_key_store::{Cache, CacheOptions};
 use std::fs;
 use std::path::Path;
+use std::string::ToString;
 use std::sync::Once;
-use dig_key_store::{Cache, CacheOptions};
+use std::time::Duration;
 use tokio::time::sleep;
 
 static TESTS_RS_DB_PATH: &str = "tests/db/cargo_integration_tests.sqlite";
@@ -23,7 +23,10 @@ pub fn clean_db_files_once() {
             if !parent.exists() {
                 println!("Creating directory for test database: {:?}", parent);
                 fs::create_dir_all(parent).unwrap_or_else(|e| {
-                    println!("Warning: Failed to create directory for test database: {}", e);
+                    println!(
+                        "Warning: Failed to create directory for test database: {}",
+                        e
+                    );
                 });
             }
         }
@@ -38,9 +41,12 @@ pub fn clean_db_files_once() {
                     Ok(_) => {
                         println!("Successfully deleted database file");
                         break;
-                    },
+                    }
                     Err(e) => {
-                        println!("Warning: Failed to delete database file (attempt {}/5): {}", attempt, e);
+                        println!(
+                            "Warning: Failed to delete database file (attempt {}/5): {}",
+                            attempt, e
+                        );
                         if attempt < 5 {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
@@ -58,9 +64,12 @@ pub fn clean_db_files_once() {
                     Ok(_) => {
                         println!("Successfully deleted WAL file");
                         break;
-                    },
+                    }
                     Err(e) => {
-                        println!("Warning: Failed to delete WAL file (attempt {}/5): {}", attempt, e);
+                        println!(
+                            "Warning: Failed to delete WAL file (attempt {}/5): {}",
+                            attempt, e
+                        );
                         if attempt < 5 {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
@@ -78,9 +87,12 @@ pub fn clean_db_files_once() {
                     Ok(_) => {
                         println!("Successfully deleted SHM file");
                         break;
-                    },
+                    }
                     Err(e) => {
-                        println!("Warning: Failed to delete SHM file (attempt {}/5): {}", attempt, e);
+                        println!(
+                            "Warning: Failed to delete SHM file (attempt {}/5): {}",
+                            attempt, e
+                        );
                         if attempt < 5 {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
@@ -95,7 +107,10 @@ pub fn clean_db_files_once() {
 
 async fn create_test_cache() -> Cache {
     // Get the current test name for logging purposes
-    let test_name = std::thread::current().name().unwrap_or("unknown").to_string();
+    let test_name = std::thread::current()
+        .name()
+        .unwrap_or("unknown")
+        .to_string();
     println!("Creating cache for test: {}", test_name);
 
     // Use a single database file for all integration tests
@@ -104,14 +119,14 @@ async fn create_test_cache() -> Cache {
 
     let options = CacheOptions {
         max_memory_mb: 10,
-        db_path
+        db_path,
     };
 
     match Cache::new(options).await {
         Ok(cache) => {
             println!("Successfully created cache instance");
             cache
-        },
+        }
         Err(e) => {
             panic!("Failed to create cache: {:?}", e);
         }
@@ -176,7 +191,10 @@ async fn test_expiration() {
 
     // Set with 1 second TTL
     println!("Setting key '{}' with 1 second TTL", key);
-    cache.set(key, value, Some(Duration::from_secs(1))).await.unwrap();
+    cache
+        .set(key, value, Some(Duration::from_secs(1)))
+        .await
+        .unwrap();
 
     // Should be available immediately
     println!("Verifying key is available immediately after setting");
@@ -189,68 +207,17 @@ async fn test_expiration() {
     sleep(Duration::from_secs(2)).await;
     println!("Wait complete, key should now be expired");
 
-    // Call get multiple times to ensure the expiration check is triggered
-    // The first call might not trigger the check if the value is still in the memory cache
-    println!("Attempting to retrieve expired key (may require multiple attempts)");
-    for attempt in 1..=3 {
-        println!("Attempt #{} to verify key has expired", attempt);
-        let result = cache.get(key).await.unwrap();
-        if result.is_none() {
-            // Test passes if we get None
-            println!("SUCCESS: Key has expired and was properly removed from cache");
-            return;
-        }
-        // Wait a bit before trying again
-        println!("Key still exists in cache, waiting 500ms before next attempt");
-        sleep(Duration::from_millis(500)).await;
-    }
+    let result = cache.get(key).await.unwrap();
+    assert_eq!(result, None, "Key should have been expired");
 
-    // If we get here, the test fails
-    panic!("Value did not expire after multiple attempts");
+    // Test passes if we get None
+    println!("SUCCESS: Key has expired and was properly removed from cache");
+    return;
 }
 
 #[tokio::test]
-async fn test_memory_cache_ttl_eviction() {
-    println!("\nINTEGRATION TEST: Testing TTL eviction from memory cache");
-
-    // Set up test database once
-    clean_db_files_once();
-
-    let cache = create_test_cache().await;
-    let key = "tests_rs_test_memory_cache_ttl_eviction_check";
-    let value = b"memory_cache_value";
-
-    // Set with 1 second TTL
-    println!("Setting key '{}' with 1 second TTL", key);
-    cache.set(key, value, Some(Duration::from_secs(1))).await.unwrap();
-
-    // Get the key to ensure it's in the memory cache
-    println!("Getting key '{}' to ensure it's in memory cache", key);
-    let result = cache.get(key).await.unwrap();
-    assert_eq!(result, Some(value.to_vec()));
-    println!("Key was successfully retrieved and should now be in memory cache");
-
-    // Wait for expiration
-    println!("Waiting for 2 seconds to allow key to expire...");
-    sleep(Duration::from_secs(2)).await;
-    println!("Wait complete, key should now be expired");
-
-    // Get the key again - it should be evicted due to TTL expiration
-    println!("Getting key '{}' after expiration - should be evicted", key);
-    let result = cache.get(key).await.unwrap();
-    assert_eq!(result, None, "Key should have been evicted due to TTL expiration");
-    println!("SUCCESS: Key was properly evicted on get due to TTL expiration");
-
-    // Try to get the key again - it should still be None since it was removed from both memory and DB
-    println!("Getting key '{}' again - should still be None", key);
-    let result = cache.get(key).await.unwrap();
-    assert_eq!(result, None, "Key should still be None after eviction");
-    println!("SUCCESS: Key remains evicted after first get operation");
-}
-
-#[tokio::test]
-async fn test_memory_pressure_eviction() {
-    println!("\nINTEGRATION TEST: Testing memory pressure eviction");
+async fn test_memory_pressure_eviction_miss_access() {
+    println!("\nINTEGRATION TEST: Testing memory pressure eviction and miss access via DB");
 
     // Set up test database once
     clean_db_files_once();
@@ -266,7 +233,9 @@ async fn test_memory_pressure_eviction() {
         db_path,
     };
 
-    let cache = Cache::new(options).await.expect("Failed to create cache for test");
+    let cache = Cache::new(options)
+        .await
+        .expect("Failed to create cache for test");
     println!("Successfully created cache instance with 1MB memory limit");
 
     // First key that we'll check if it gets evicted
@@ -301,9 +270,15 @@ async fn test_memory_pressure_eviction() {
     cache.set(large_key, &large_value, None).await.unwrap();
 
     // The first key should still be in the database but might be evicted from memory
-    println!("Checking if first key is still accessible (should be in DB even if evicted from memory)");
+    println!(
+        "Checking if first key is still accessible (should be in DB even if evicted from memory)"
+    );
     let result = cache.get(first_key).await.unwrap();
-    assert_eq!(result, Some(first_value), "First key should still be accessible from database");
+    assert_eq!(
+        result,
+        Some(first_value),
+        "First key should still be accessible from database"
+    );
     println!("SUCCESS: First key is still accessible after memory pressure");
 
     // Check that some of the middle keys were evicted from memory but still in DB
@@ -313,7 +288,12 @@ async fn test_memory_pressure_eviction() {
         let key = format!("tests_rs_test_memory_pressure_eviction_key_{}", i);
         let expected_value = vec![i as u8; 100_000];
         let result = cache.get(&key).await.unwrap();
-        assert_eq!(result, Some(expected_value), "Key {} should still be accessible from database", key);
+        assert_eq!(
+            result,
+            Some(expected_value),
+            "Key {} should still be accessible from database",
+            key
+        );
     }
     println!("SUCCESS: All keys are still accessible after memory pressure");
 }
@@ -337,7 +317,9 @@ async fn test_cross_layer_synchronization() {
         db_path: db_path.clone(),
     };
 
-    let cache1 = Cache::new(options1).await.expect("Failed to create first cache instance");
+    let cache1 = Cache::new(options1)
+        .await
+        .expect("Failed to create first cache instance");
     println!("Successfully created first cache instance");
 
     // Set a key in the first cache
@@ -353,18 +335,27 @@ async fn test_cross_layer_synchronization() {
         db_path,
     };
 
-    let cache2 = Cache::new(options2).await.expect("Failed to create second cache instance");
+    let cache2 = Cache::new(options2)
+        .await
+        .expect("Failed to create second cache instance");
     println!("Successfully created second cache instance");
 
     // Get the key from the second cache - it should be retrieved from the database
     println!("Getting key '{}' from second cache", key);
     let result = cache2.get(key).await.unwrap();
-    assert_eq!(result, Some(value1.to_vec()), "Second cache should retrieve value set by first cache");
+    assert_eq!(
+        result,
+        Some(value1.to_vec()),
+        "Second cache should retrieve value set by first cache"
+    );
     println!("SUCCESS: Second cache successfully retrieved value set by first cache");
 
     // First, delete the key from the first cache to force it to fetch from the database
     // This is necessary because the cache prioritizes memory cache over database
-    println!("Deleting key '{}' from first cache to force database fetch", key);
+    println!(
+        "Deleting key '{}' from first cache to force database fetch",
+        key
+    );
     cache1.delete(key).await.unwrap();
 
     // Now set the key in the second cache
@@ -375,7 +366,11 @@ async fn test_cross_layer_synchronization() {
     // Get the updated key from the first cache - it should fetch from the database
     println!("Getting updated key '{}' from first cache", key);
     let result = cache1.get(key).await.unwrap();
-    assert_eq!(result, Some(value2.to_vec()), "First cache should retrieve updated value from second cache");
+    assert_eq!(
+        result,
+        Some(value2.to_vec()),
+        "First cache should retrieve updated value from second cache"
+    );
     println!("SUCCESS: First cache successfully retrieved updated value from second cache");
 
     // Delete the key in the first cache
@@ -385,7 +380,10 @@ async fn test_cross_layer_synchronization() {
     // Try to get the deleted key from the second cache - it should be gone
     println!("Attempting to get deleted key '{}' from second cache", key);
     let result = cache2.get(key).await.unwrap();
-    assert_eq!(result, None, "Key should be deleted in second cache as well");
+    assert_eq!(
+        result, None,
+        "Key should be deleted in second cache as well"
+    );
     println!("SUCCESS: Key deletion was properly synchronized between caches");
 }
 
@@ -406,7 +404,10 @@ async fn test_simulated_concurrent_access() {
     // Number of operations per client
     let ops_per_client = 50;
 
-    println!("Creating {} cache instances to simulate concurrent clients", num_clients);
+    println!(
+        "Creating {} cache instances to simulate concurrent clients",
+        num_clients
+    );
 
     // Create multiple cache instances that all point to the same database
     let mut caches = Vec::with_capacity(num_clients);
@@ -416,18 +417,26 @@ async fn test_simulated_concurrent_access() {
             db_path: db_path.clone(),
         };
 
-        let cache = Cache::new(options).await.expect("Failed to create cache instance");
+        let cache = Cache::new(options)
+            .await
+            .expect("Failed to create cache instance");
         println!("Successfully created cache instance {}", i);
         caches.push(cache);
     }
 
-    println!("Simulating concurrent access with {} operations per client", ops_per_client);
+    println!(
+        "Simulating concurrent access with {} operations per client",
+        ops_per_client
+    );
 
     // Simulate concurrent operations by interleaving operations from different clients
     for op_id in 0..ops_per_client {
         // Each client performs an operation
         for client_id in 0..num_clients {
-            let key = format!("tests_rs_test_simulated_concurrent_access_key_{}_{}", client_id, op_id);
+            let key = format!(
+                "tests_rs_test_simulated_concurrent_access_key_{}_{}",
+                client_id, op_id
+            );
             let value = format!("value_{}_{}", client_id, op_id).into_bytes();
 
             // Set the key
@@ -435,36 +444,61 @@ async fn test_simulated_concurrent_access() {
 
             // Get the key
             let result = caches[client_id].get(&key).await.unwrap();
-            assert_eq!(result, Some(value.clone()), "Client {} failed to get key {}", client_id, key);
+            assert_eq!(
+                result,
+                Some(value.clone()),
+                "Client {} failed to get key {}",
+                client_id,
+                key
+            );
 
             // Occasionally read keys from other clients
             if op_id % 10 == 0 && client_id > 0 {
                 let other_client_id = (client_id - 1) % num_clients;
-                let other_key = format!("tests_rs_test_simulated_concurrent_access_key_{}_{}", other_client_id, op_id);
+                let other_key = format!(
+                    "tests_rs_test_simulated_concurrent_access_key_{}_{}",
+                    other_client_id, op_id
+                );
 
                 // Try to get the key from another client (it should exist since we're processing sequentially)
                 let result = caches[client_id].get(&other_key).await.unwrap();
                 if let Some(other_value) = result {
-                    let expected_value = format!("value_{}_{}", other_client_id, op_id).into_bytes();
-                    assert_eq!(other_value, expected_value, "Client {} got incorrect value for key {}", client_id, other_key);
+                    let expected_value =
+                        format!("value_{}_{}", other_client_id, op_id).into_bytes();
+                    assert_eq!(
+                        other_value, expected_value,
+                        "Client {} got incorrect value for key {}",
+                        client_id, other_key
+                    );
                 }
             }
 
             // Occasionally delete keys
             if op_id % 20 == 0 && op_id > 0 {
-                let delete_key = format!("tests_rs_test_simulated_concurrent_access_key_{}_{}", client_id, op_id - 10);
+                let delete_key = format!(
+                    "tests_rs_test_simulated_concurrent_access_key_{}_{}",
+                    client_id,
+                    op_id - 10
+                );
                 caches[client_id].delete(&delete_key).await.unwrap();
 
                 // Verify deletion
                 let result = caches[client_id].get(&delete_key).await.unwrap();
-                assert_eq!(result, None, "Client {} failed to delete key {}", client_id, delete_key);
+                assert_eq!(
+                    result, None,
+                    "Client {} failed to delete key {}",
+                    client_id, delete_key
+                );
 
                 // Verify other clients also see the deletion
                 if client_id < num_clients - 1 {
                     let next_client_id = client_id + 1;
                     let result = caches[next_client_id].get(&delete_key).await.unwrap();
-                    assert_eq!(result, None, "Client {} still sees key {} that was deleted by client {}", 
-                              next_client_id, delete_key, client_id);
+                    assert_eq!(
+                        result, None,
+                        "Client {} still sees key {} that was deleted by client {}",
+                        next_client_id, delete_key, client_id
+                    );
                 }
             }
         }
@@ -491,7 +525,9 @@ async fn test_memory_limit_enforcement() {
         db_path,
     };
 
-    let cache = Cache::new(options).await.expect("Failed to create cache for test");
+    let cache = Cache::new(options)
+        .await
+        .expect("Failed to create cache for test");
     println!("Successfully created cache instance with 1MB memory limit");
 
     // Add a sequence of keys with increasing sizes
@@ -519,21 +555,36 @@ async fn test_memory_limit_enforcement() {
 
     // Verify the large key is in the cache
     let result = cache.get(large_key).await.unwrap();
-    assert_eq!(result, Some(large_value.clone()), "Large key should be in the cache");
+    assert_eq!(
+        result,
+        Some(large_value.clone()),
+        "Large key should be in the cache"
+    );
     println!("Large key is in the cache as expected");
 
     // Add another large key to definitely trigger more evictions
     let another_large_key = "tests_rs_test_memory_limit_enforcement_another_large_key";
     let another_large_value = vec![1u8; 500_000]; // Another 500KB
     println!("Adding another large key to trigger more evictions");
-    cache.set(another_large_key, &another_large_value, None).await.unwrap();
+    cache
+        .set(another_large_key, &another_large_value, None)
+        .await
+        .unwrap();
 
     // Verify both large keys are still accessible (from DB if not from memory)
     let result = cache.get(large_key).await.unwrap();
-    assert_eq!(result, Some(large_value), "First large key should still be accessible");
+    assert_eq!(
+        result,
+        Some(large_value),
+        "First large key should still be accessible"
+    );
 
     let result = cache.get(another_large_key).await.unwrap();
-    assert_eq!(result, Some(another_large_value), "Second large key should be accessible");
+    assert_eq!(
+        result,
+        Some(another_large_value),
+        "Second large key should be accessible"
+    );
 
     println!("Both large keys are still accessible as expected");
 
@@ -545,7 +596,12 @@ async fn test_memory_limit_enforcement() {
         let key = format!("tests_rs_test_memory_limit_enforcement_small_key_{}", i);
         let expected_value = vec![i as u8; 10_000];
         let result = cache.get(&key).await.unwrap();
-        assert_eq!(result, Some(expected_value), "Small key {} should still be accessible", i);
+        assert_eq!(
+            result,
+            Some(expected_value),
+            "Small key {} should still be accessible",
+            i
+        );
     }
 
     // Check medium keys
@@ -553,7 +609,12 @@ async fn test_memory_limit_enforcement() {
         let key = format!("tests_rs_test_memory_limit_enforcement_medium_key_{}", i);
         let expected_value = vec![i as u8; 100_000];
         let result = cache.get(&key).await.unwrap();
-        assert_eq!(result, Some(expected_value), "Medium key {} should still be accessible", i);
+        assert_eq!(
+            result,
+            Some(expected_value),
+            "Medium key {} should still be accessible",
+            i
+        );
     }
 
     println!("SUCCESS: Memory limit is enforced, but all keys remain accessible from the database");

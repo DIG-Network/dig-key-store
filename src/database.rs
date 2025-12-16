@@ -1,7 +1,11 @@
-use std::path::Path;
-use sqlx::{sqlite::SqlitePoolOptions, migrate::{MigrateDatabase, Migrator}, Sqlite, Pool, FromRow, Error};
-use thiserror::Error;
 use crate::is_sqlite_busy_error;
+use sqlx::{
+    Error, FromRow, Pool, Sqlite,
+    migrate::{MigrateDatabase, Migrator},
+    sqlite::SqlitePoolOptions,
+};
+use std::path::Path;
+use thiserror::Error;
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -25,7 +29,10 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
     // Retry the entire initialization process if needed
     loop {
         if init_retry_count > 0 {
-            println!("Retrying entire database initialization (attempt {}/{})", init_retry_count, max_init_retries);
+            println!(
+                "Retrying entire database initialization (attempt {}/{})",
+                init_retry_count, max_init_retries
+            );
             tokio::time::sleep(std::time::Duration::from_millis(100 * init_retry_count)).await;
         }
 
@@ -43,23 +50,24 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
 
         // First, check if the cache table already exists
         // If it does, we can skip migrations entirely
-        let cache_table_exists = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
-            .fetch_optional(&db_connection)
-            .await
-        {
-            Ok(result) => result.is_some(),
-            Err(e) => {
-                println!("Error checking if cache table exists: {:?}", e);
-                if is_sqlite_busy_error(&e) {
-                    init_retry_count += 1;
-                    if init_retry_count >= max_init_retries {
-                        return Err(DbError::DatabaseError(e));
+        let cache_table_exists =
+            match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
+                .fetch_optional(&db_connection)
+                .await
+            {
+                Ok(result) => result.is_some(),
+                Err(e) => {
+                    println!("Error checking if cache table exists: {:?}", e);
+                    if is_sqlite_busy_error(&e) {
+                        init_retry_count += 1;
+                        if init_retry_count >= max_init_retries {
+                            return Err(DbError::DatabaseError(e));
+                        }
+                        continue;
                     }
-                    continue;
+                    return Err(DbError::DatabaseError(e));
                 }
-                return Err(DbError::DatabaseError(e));
-            }
-        };
+            };
 
         if cache_table_exists {
             println!("Cache table already exists, skipping migrations");
@@ -67,9 +75,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         }
 
         // Check if the _sqlx_migrations table exists
-        let migration_table_exists = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'")
-            .fetch_optional(&db_connection)
-            .await
+        let migration_table_exists = match sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+        )
+        .fetch_optional(&db_connection)
+        .await
         {
             Ok(result) => result.is_some(),
             Err(e) => {
@@ -96,9 +106,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 println!("Migrations applied successfully");
 
                 // Verify that the cache table was created
-                let cache_table_created = match sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name='cache'")
-                    .fetch_optional(&db_connection)
-                    .await
+                let cache_table_created = match sqlx::query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='cache'",
+                )
+                .fetch_optional(&db_connection)
+                .await
                 {
                     Ok(result) => result.is_some(),
                     Err(e) => {
@@ -121,11 +133,13 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     println!("Warning: Migrations succeeded but cache table wasn't created");
                     init_retry_count += 1;
                     if init_retry_count >= max_init_retries {
-                        return Err(DbError::PoolError("Migrations succeeded but cache table wasn't created".to_string()));
+                        return Err(DbError::PoolError(
+                            "Migrations succeeded but cache table wasn't created".to_string(),
+                        ));
                     }
                     continue;
                 }
-            },
+            }
             Err(migration_error) => {
                 let sqlx_error = Error::from(migration_error);
 
@@ -146,7 +160,10 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     if let Some(code) = db_err.code() {
                         // SQLite error code 1555 is "UNIQUE constraint failed"
                         if code.to_string() == "1555" {
-                            println!("Unique constraint error during migration: {}", db_err.message());
+                            println!(
+                                "Unique constraint error during migration: {}",
+                                db_err.message()
+                            );
 
                             // Wait a bit to let any concurrent migrations finish
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -171,10 +188,14 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                             };
 
                             if cache_table_exists {
-                                println!("Cache table exists after constraint error, proceeding with connection");
+                                println!(
+                                    "Cache table exists after constraint error, proceeding with connection"
+                                );
                                 return Ok(db_connection);
                             } else {
-                                println!("Cache table doesn't exist after constraint error, retrying entire initialization");
+                                println!(
+                                    "Cache table doesn't exist after constraint error, retrying entire initialization"
+                                );
                                 init_retry_count += 1;
                                 if init_retry_count >= max_init_retries {
                                     return Err(DbError::DatabaseError(sqlx_error));
@@ -217,13 +238,16 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
     let max_retries = 10;
     let mut retry_count = 0;
 
-    while !Sqlite::database_exists(&basic_db_url).await.unwrap_or(false) {
+    while !Sqlite::database_exists(&basic_db_url)
+        .await
+        .unwrap_or(false)
+    {
         println!("Database does not exist, creating it");
         match Sqlite::create_database(&basic_db_url).await {
             Ok(_) => {
                 println!("Database created successfully");
                 break;
-            },
+            }
             Err(e) => {
                 // If it's a busy/locked error, retry
                 if is_sqlite_busy_error(&e) {
@@ -232,12 +256,17 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                         println!("Max retries reached while creating database");
                         return Err(DbError::DatabaseError(e));
                     }
-                    println!("Database is busy/locked during creation, retrying in 10ms (attempt {}/{})", 
-                             retry_count, max_retries);
+                    println!(
+                        "Database is busy/locked during creation, retrying in 10ms (attempt {}/{})",
+                        retry_count, max_retries
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
                     // Check again if the database exists (another process might have created it)
-                    if Sqlite::database_exists(&basic_db_url).await.unwrap_or(false) {
+                    if Sqlite::database_exists(&basic_db_url)
+                        .await
+                        .unwrap_or(false)
+                    {
                         println!("Database now exists, another process must have created it");
                         break;
                     }
@@ -264,17 +293,20 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         match SqlitePoolOptions::new()
             .max_connections(5) // Increased from 1 to 5 to allow concurrent access
             .acquire_timeout(std::time::Duration::from_secs(10))
-            .connect(&db_url).await
+            .connect(&db_url)
+            .await
         {
             Ok(pool) => {
                 db_pool = Some(pool);
-            },
+            }
             Err(e) => {
                 // If it's a busy/locked error, retry
                 if is_sqlite_busy_error(&e) {
                     retry_count += 1;
-                    println!("Database is busy/locked during connection, retrying in 10ms (attempt {}/{})", 
-                             retry_count, max_retries);
+                    println!(
+                        "Database is busy/locked during connection, retrying in 10ms (attempt {}/{})",
+                        retry_count, max_retries
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 } else {
                     // For any other error, return it
@@ -287,7 +319,10 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
 
     // If we've exhausted retries and still don't have a connection, return an error
     let db_pool = db_pool.ok_or_else(|| {
-        let msg = format!("Failed to connect to database after {} retries", max_retries);
+        let msg = format!(
+            "Failed to connect to database after {} retries",
+            max_retries
+        );
         println!("{}", msg);
         DbError::PoolError(msg)
     })?;
@@ -352,58 +387,71 @@ pub struct CacheKey {
 
 // Type-safe query functions
 pub async fn key_exists(db_pool: &Pool<Sqlite>, key: &str) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query_as::<_, KeyExistsResult>("SELECT EXISTS(SELECT 1 FROM cache WHERE cache_key = ?) as \"exists\"")
-        .bind(key)
-        .fetch_one(db_pool)
-        .await?;
+    let result = sqlx::query_as::<_, KeyExistsResult>(
+        "SELECT EXISTS(SELECT 1 FROM cache WHERE cache_key = ?) as \"exists\"",
+    )
+    .bind(key)
+    .fetch_one(db_pool)
+    .await?;
 
     Ok(result.exists)
 }
 
 pub async fn update_cache_entry(
-    db_pool: &Pool<Sqlite>, 
-    key: &str, 
-    value: &[u8], 
-    expires: Option<i64>, 
-    last_accessed: i64
+    db_pool: &Pool<Sqlite>,
+    key: &str,
+    value: &[u8],
+    expires: Option<i64>,
+    last_accessed: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE cache SET cache_value = ?, expires = ?, last_accessed = ? WHERE cache_key = ?")
-        .bind(value)
-        .bind(expires)
-        .bind(last_accessed)
-        .bind(key)
-        .execute(db_pool)
-        .await?;
+    sqlx::query(
+        "UPDATE cache SET cache_value = ?, expires = ?, last_accessed = ? WHERE cache_key = ?",
+    )
+    .bind(value)
+    .bind(expires)
+    .bind(last_accessed)
+    .bind(key)
+    .execute(db_pool)
+    .await?;
 
     Ok(())
 }
 
 pub async fn insert_cache_entry(
-    db_pool: &Pool<Sqlite>, 
-    key: &str, 
-    value: &[u8], 
-    expires: Option<i64>, 
-    last_accessed: i64
+    db_pool: &Pool<Sqlite>,
+    key: &str,
+    value: &[u8],
+    expires: Option<i64>,
+    last_accessed: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO cache (cache_key, cache_value, expires, last_accessed) VALUES (?, ?, ?, ?)")
-        .bind(key)
-        .bind(value)
-        .bind(expires)
-        .bind(last_accessed)
-        .execute(db_pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO cache (cache_key, cache_value, expires, last_accessed) VALUES (?, ?, ?, ?)",
+    )
+    .bind(key)
+    .bind(value)
+    .bind(expires)
+    .bind(last_accessed)
+    .execute(db_pool)
+    .await?;
 
     Ok(())
 }
 
-pub async fn get_cache_entry(db_pool: &Pool<Sqlite>, key: &str) -> Result<Option<CacheEntry>, sqlx::Error> {
+pub async fn get_cache_entry(
+    db_pool: &Pool<Sqlite>,
+    key: &str,
+) -> Result<Option<CacheEntry>, sqlx::Error> {
     sqlx::query_as::<_, CacheEntry>("SELECT cache_value, expires FROM cache WHERE cache_key = ?")
         .bind(key)
         .fetch_optional(db_pool)
         .await
 }
 
-pub async fn update_last_accessed(db_pool: &Pool<Sqlite>, key: &str, last_accessed: i64) -> Result<(), sqlx::Error> {
+pub async fn update_last_accessed(
+    db_pool: &Pool<Sqlite>,
+    key: &str,
+    last_accessed: i64,
+) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE cache SET last_accessed = ? WHERE cache_key = ?")
         .bind(last_accessed)
         .bind(key)
@@ -422,11 +470,16 @@ pub async fn delete_cache_entry(db_pool: &Pool<Sqlite>, key: &str) -> Result<(),
     Ok(())
 }
 
-pub async fn get_expired_keys(db_pool: &Pool<Sqlite>, now: i64) -> Result<Vec<CacheKey>, sqlx::Error> {
-    sqlx::query_as::<_, CacheKey>("SELECT cache_key FROM cache WHERE expires < ? AND expires IS NOT NULL")
-        .bind(now)
-        .fetch_all(db_pool)
-        .await
+pub async fn get_expired_keys(
+    db_pool: &Pool<Sqlite>,
+    now: i64,
+) -> Result<Vec<CacheKey>, sqlx::Error> {
+    sqlx::query_as::<_, CacheKey>(
+        "SELECT cache_key FROM cache WHERE expires < ? AND expires IS NOT NULL",
+    )
+    .bind(now)
+    .fetch_all(db_pool)
+    .await
 }
 
 pub async fn delete_keys_batch(db_pool: &Pool<Sqlite>, keys: &[String]) -> Result<(), sqlx::Error> {
@@ -435,10 +488,7 @@ pub async fn delete_keys_batch(db_pool: &Pool<Sqlite>, keys: &[String]) -> Resul
     }
 
     // SQLite doesn't support array parameters, so we need to build a query with placeholders
-    let placeholders = keys.iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
+    let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     let query = format!("DELETE FROM cache WHERE cache_key IN ({})", placeholders);
 

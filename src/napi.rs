@@ -2,11 +2,11 @@
 mod napi_impl {
     use napi::bindgen_prelude::*;
     use napi_derive::napi;
-    use std::time::Duration;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::runtime::Runtime;
 
-    use crate::{Cache, CacheOptions, CacheError};
+    use crate::{Cache, CacheError, CacheOptions};
 
     // Thread-local runtime for executing async code
     thread_local! {
@@ -39,12 +39,12 @@ mod napi_impl {
             };
 
             let cache = RUNTIME.with(|rt| {
-                rt.block_on(async {
-                    Cache::new(rust_options).await.map_err(convert_error)
-                })
+                rt.block_on(async { Cache::new(rust_options).await.map_err(convert_error) })
             })?;
 
-            Ok(Self { cache: Arc::new(cache) })
+            Ok(Self {
+                cache: Arc::new(cache),
+            })
         }
 
         #[napi]
@@ -55,7 +55,10 @@ mod napi_impl {
 
             RUNTIME.with(|rt| {
                 rt.block_on(async {
-                    cache.set(&key, &value_vec, ttl).await.map_err(convert_error)
+                    cache
+                        .set(&key, &value_vec, ttl)
+                        .await
+                        .map_err(convert_error)
                 })
             })
         }
@@ -79,11 +82,8 @@ mod napi_impl {
         pub fn delete(&self, key: String) -> napi::Result<()> {
             let cache = self.cache.clone();
 
-            RUNTIME.with(|rt| {
-                rt.block_on(async {
-                    cache.delete(&key).await.map_err(convert_error)
-                })
-            })
+            RUNTIME
+                .with(|rt| rt.block_on(async { cache.delete(&key).await.map_err(convert_error) }))
         }
     }
 }

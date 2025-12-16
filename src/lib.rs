@@ -1,23 +1,12 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::sync::{Arc, Mutex};
 use std::num::NonZeroUsize;
 use std::result::Result;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sqlx::{Sqlite, Pool};
 use lru::LruCache;
+use sqlx::{Pool, Sqlite};
 use thiserror::Error;
 
-// Import database queries
-use crate::database::{
-    key_exists, 
-    update_cache_entry, 
-    insert_cache_entry, 
-    get_cache_entry, 
-    update_last_accessed, 
-    delete_cache_entry, 
-    get_expired_keys, 
-    delete_keys_batch
-};
 
 mod database;
 #[cfg(feature = "napi-bindings")]
@@ -36,7 +25,8 @@ pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
     false
 }
 
-/// Retries a database operation until it succeeds or encounters a non-busy error
+/// Retries a database operation until it succeeds or encounters a non-busy error. Ideally this
+/// should be called in a non-blocking task
 pub async fn retry_on_busy<F, Fut, T>(operation: F) -> Result<T, CacheError>
 where
     F: Fn() -> Fut + Send + Sync,
@@ -45,25 +35,31 @@ where
 {
     // Use a constant, minimal delay for high performance
     let retry_delay_ms = 5; // Fixed 5ms delay between retries
-    let max_retries = 1000;
+    let max_retries = 10;
     let mut retry_count = 0;
 
     loop {
+        println!("Retry loop running {}", retry_count);
         match operation().await {
             Ok(result) => return Ok(result),
             Err(err) if is_sqlite_busy_error(&err) => {
                 retry_count += 1;
                 if retry_count > max_retries {
-                    println!("Database is busy/locked, max retries ({}) exceeded", max_retries);
+                    println!(
+                        "Database is busy/locked, max retries ({}) exceeded",
+                        max_retries
+                    );
                     return Err(CacheError::DatabaseError(err));
                 }
 
                 // If we get a busy error, wait with a constant minimal delay and retry
-                println!("Database is busy/locked, retrying in {}ms (attempt {}/{})", 
-                         retry_delay_ms, retry_count, max_retries);
+                println!(
+                    "Database is busy/locked, retrying in {}ms (attempt {}/{})",
+                    retry_delay_ms, retry_count, max_retries
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                 continue;
-            },
+            }
             Err(err) => return Err(CacheError::DatabaseError(err)),
         }
     }
@@ -100,6 +96,11 @@ pub enum CacheError {
 
     #[error("Invalid value: {0}")]
     InvalidValue(String),
+
+    #[error(
+        "TTL value overflow. Current time (seconds) + TTL (seconds) must be less than (2^63)-1 seconds"
+    )]
+    TtlValueOverflow,
 }
 
 #[derive(Debug, Clone)]
@@ -136,39 +137,21 @@ pub struct CacheOptions {
 /// }
 /// ```
 pub struct Cache {
-    memory_cache: Arc<Mutex<LruCache<String, Vec<u8>>>>,
+    memory_cache: Arc<Mutex<LruCache<String, CacheData>>>,
     db_pool: Pool<Sqlite>,
     options: CacheOptions,
     current_memory_usage: Arc<Mutex<usize>>,
 }
 
 impl Cache {
-
-    /// Evicts items from the LRU cache if memory usage exceeds the limit
-    fn evict_if_memory_pressure(&self, memory_cache: &mut LruCache<String, Vec<u8>>, memory_usage: &mut usize) {
-        let max_memory_bytes = self.options.max_memory_mb * 1024 * 1024;
-        while *memory_usage > max_memory_bytes && memory_cache.len() > 1 {
-            // Evict the least recently used item
-            if let Some((evicted_key, evicted_value)) = memory_cache.pop_lru() {
-                // Subtract the size of the evicted key and value from memory usage
-                let evicted_size = evicted_key.len() + evicted_value.len();
-                *memory_usage = memory_usage.saturating_sub(evicted_size);
-                println!("Evicted key '{}' due to memory pressure. Memory usage: {}/{} bytes", 
-                         evicted_key, *memory_usage, max_memory_bytes);
-            } else {
-                // No more items to evict
-                break;
-            }
-        }
-    }
-
     pub async fn new(options: CacheOptions) -> Result<Self, CacheError> {
         // Set up database connection using the db_connection module
         let db_pool = database::init(&options.db_path).await?;
 
         // Create LRU cache
-        let max_items = NonZeroUsize::new(MAX_LRU_CACHE_ITEMS)
-            .ok_or_else(|| CacheError::InvalidValue("MAX_LRU_CACHE_ITEMS cannot be zero".to_string()))?;
+        let max_items = NonZeroUsize::new(MAX_LRU_CACHE_ITEMS).ok_or_else(|| {
+            CacheError::InvalidValue("MAX_LRU_CACHE_ITEMS cannot be zero".to_string())
+        })?;
         let memory_cache = Arc::new(Mutex::new(LruCache::new(max_items)));
 
         // Initialize memory usage tracker
@@ -184,142 +167,115 @@ impl Cache {
         Ok(cache)
     }
 
-    pub async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
-        let expires = ttl.map(|duration| -> Result<i64, CacheError> {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)?
-                .as_secs() as i64;
-            Ok(now + duration.as_secs() as i64)
-        }).transpose()?;
+    pub async fn set(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        let expires = Self::calculate_expiry_secs(ttl)?;
 
         // Update SQLite
         self.set_in_db(key, value, expires).await?;
 
         // Update memory cache and track memory usage
         let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-        let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+
+        // Add new value size to memory usage
+        let new_value = value.to_vec();
+        let new_size = new_value.len() + key.len();
+
+        // Update memory cache
+        let maybe_old_value= memory_cache.put(
+            key.to_string(),
+            CacheData {
+                data: new_value,
+                expires,
+            },
+        );
 
         // Check if key already exists in memory cache
-        let _old_value_size = if let Some(old_value) = memory_cache.get(key) {
-            // If key exists, subtract old value size from memory usage
-            let size = old_value.len() + key.len();
-            *memory_usage = memory_usage.saturating_sub(size);
-            size
+        let removed_size = if let Some(old_value) = maybe_old_value {
+            old_value.data.len() + key.len()
         } else {
             0
         };
 
-        // Add new value size to memory usage
-        let new_value = value.to_vec();
-        let new_value_size = new_value.len() + key.len();
-        *memory_usage += new_value_size;
-
-        // Check if memory usage exceeds the limit and perform lazy eviction
-        self.evict_if_memory_pressure(&mut memory_cache, &mut memory_usage);
-
-        // Update memory cache
-        memory_cache.put(key.to_string(), new_value);
+        self.update_memory_usage(Some(new_size), Some(removed_size));
 
         Ok(())
     }
 
+    /// Retrieves a value from the cache. Values cached in memory are immediately returned and lazily
+    /// reconciled with the DB. If there is a memory cache miss, or the value in memory is expired,
+    /// the value will be retrieved from the database and added to the memory cache. If the value is expired
+    /// in the DB it will be lazily removed.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
         // Check if key exists in memory cache
-        let memory_value = {
-            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
+        let maybe_memory_value = {
+            let mut memory_cache = self
+                .memory_cache
+                .lock()
+                .map_err(|_| CacheError::MutexLockError)?;
             if let Some(value) = memory_cache.get(key) {
-                Some(value.clone())
+                if value.expired() {
+                    // Remove expired entry from memory cache
+                    memory_cache.pop(key);
+                    None
+                } else {
+                    self.update_last_accessed(key).await?;
+                    Some(value.data.clone())
+                }
             } else {
                 None
             }
         };
 
-        // Check database for TTL information and value if not in memory
-        match self.get_from_db(key).await? {
-            Some((db_value, expires)) => {
-                // Check if expired
-                if let Some(expires) = expires {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_secs() as i64;
-                    if now > expires {
-                        // Remove expired entry from database
-                        self.delete_from_db(key).await?;
+        if maybe_memory_value.is_none() {
+            let maybe_db_value = self.get_from_db(key).await?;
+            if let Some(db_value) = maybe_db_value {
+                if db_value.expired() {
+                    // no memory value and expired db value -> Remove expired entry from DB
+                    // TODO wrap this in a non-blocking task
+                    self.delete_from_db(key).await?;
+                    Ok(None)
+                } else {
+                    // valid db value -> add to memory cache and track memory usage
+                    let mut memory_cache = self
+                        .memory_cache
+                        .lock()
+                        .map_err(|_| CacheError::MutexLockError)?;
 
-                        // Remove from memory cache if it exists there
-                        if memory_value.is_some() {
-                            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-                            let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+                    let size = db_value.data.len() + key.len();
+                    self.update_memory_usage(Some(size), None);
 
-                            if let Some(value) = memory_cache.pop(key) {
-                                // Subtract the size of the key and value from memory usage
-                                let size = value.len() + key.len();
-                                *memory_usage = memory_usage.saturating_sub(size);
-                                println!("Removed expired key '{}' from memory cache during get operation", key);
-                            }
-                        }
+                    memory_cache.put(key.to_string(), db_value.clone());
 
-                        return Ok(None);
-                    }
+                    Ok(Some(db_value.data))
                 }
-
-                // If we have a memory value, it's valid (not expired) so return it
-                if let Some(value) = memory_value {
-                    // Update last accessed time
-                    self.update_last_accessed(key).await?;
-                    return Ok(Some(value));
-                }
-
-                // Otherwise, update memory cache with the database value
-                let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-                let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
-
-                // Add new value size to memory usage
-                let new_value = db_value.clone();
-                let new_value_size = new_value.len() + key.len();
-                *memory_usage += new_value_size;
-
-                // Check if memory usage exceeds the limit and perform lazy eviction
-                self.evict_if_memory_pressure(&mut memory_cache, &mut memory_usage);
-
-                // Update memory cache
-                memory_cache.put(key.to_string(), new_value);
-
-                // Update last accessed time
-                self.update_last_accessed(key).await?;
-
-                Ok(Some(db_value))
-            }
-            None => {
-                // If not in database but in memory (shouldn't happen normally), remove from memory
-                if memory_value.is_some() {
-                    let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-                    let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
-
-                    if let Some(value) = memory_cache.pop(key) {
-                        // Subtract the size of the key and value from memory usage
-                        let size = value.len() + key.len();
-                        *memory_usage = memory_usage.saturating_sub(size);
-                        println!("Removed key '{}' from memory cache that was not in database", key);
-                    }
-                }
-
+            } else {
+                // no value in the memory cache and no value in the database
                 Ok(None)
-            },
+            }
+        } else {
+            Ok(maybe_memory_value)
         }
     }
 
+    /// Deletes a value from both the memory cache and the database.
     pub async fn delete(&self, key: &str) -> Result<(), CacheError> {
         // Remove from memory cache and update memory usage
         {
-            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-            let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_cache = self
+                .memory_cache
+                .lock()
+                .map_err(|_| CacheError::MutexLockError)?;
 
             // Get the value being deleted to calculate its size
             if let Some(value) = memory_cache.pop(key) {
                 // Subtract the size of the key and value from memory usage
-                let size = value.len() + key.len();
-                *memory_usage = memory_usage.saturating_sub(size);
+                let size = value.data.len() + key.len();
+                self.update_memory_usage(None, Some(size))
             }
         }
 
@@ -331,10 +287,13 @@ impl Cache {
 
     // Private helper methods
 
-    async fn set_in_db(&self, key: &str, value: &[u8], expires: Option<i64>) -> Result<(), CacheError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
+    async fn set_in_db(
+        &self,
+        key: &str,
+        value: &[u8],
+        expires: Option<i64>,
+    ) -> Result<(), CacheError> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         // Use the retry function to handle busy errors
         let db_pool = self.db_pool.clone();
@@ -345,51 +304,53 @@ impl Cache {
             async move {
                 // For SQLite, we need to use a different approach for upsert
                 println!("Checking if key exists: {}", key);
-                let existing = key_exists(&db_pool, &key).await?;
+                let existing = database::key_exists(&db_pool, &key).await?;
 
                 println!("Key exists: {}", existing);
 
                 if existing {
                     println!("Updating existing key: {}", key);
-                    update_cache_entry(&db_pool, &key, &value, expires, now).await?;
+                    database::update_cache_entry(&db_pool, &key, &value, expires, now).await?;
                     println!("Update successful");
                 } else {
                     println!("Inserting new key: {}", key);
-                    insert_cache_entry(&db_pool, &key, &value, expires, now).await?;
+                    database::insert_cache_entry(&db_pool, &key, &value, expires, now).await?;
                     println!("Insert successful");
                 }
 
                 Ok(())
             }
-        }).await?;
+        })
+        .await?;
 
         Ok(())
     }
 
-    async fn get_from_db(&self, key: &str) -> Result<Option<(Vec<u8>, Option<i64>)>, CacheError> {
+    /// Retrieves a value from the database. If the value is expired, it will be removed from the database.
+    async fn get_from_db(&self, key: &str) -> Result<Option<CacheData>, CacheError> {
         let db_pool = self.db_pool.clone();
         let key_str = key.to_string();
 
         let result = retry_on_busy(move || {
             let key = key_str.clone();
             let db_pool = db_pool.clone();
-            async move {
-                get_cache_entry(&db_pool, &key).await
-            }
-        }).await?;
+            async move { database::get_cache_entry(&db_pool, &key).await }
+        })
+        .await?;
 
         match result {
-            Some(entry) => {
-                Ok(Some((entry.cache_value, entry.expires)))
-            },
+            Some(entry) => Ok(Some(CacheData {
+                data: entry.cache_value,
+                expires: entry.expires,
+            })),
             None => Ok(None),
         }
     }
 
+    /// Updates the last accessed time for the specified key. This should be called in a non-blocking task.
     async fn update_last_accessed(&self, key: &str) -> Result<(), CacheError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
+        println!("Updating last accessed time for key: {}", key);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         let db_pool = self.db_pool.clone();
         let key_str = key.to_string();
@@ -398,10 +359,9 @@ impl Cache {
             let key = key_str.clone();
             let db_pool = db_pool.clone();
             let now = now;
-            async move {
-                update_last_accessed(&db_pool, &key, now).await
-            }
-        }).await?;
+            async move { database::update_last_accessed(&db_pool, &key, now).await }
+        })
+        .await?;
 
         Ok(())
     }
@@ -411,22 +371,87 @@ impl Cache {
         retry_on_busy(move || {
             let key = key.to_string();
             let db_pool = db_pool.clone();
-            async move {
-                delete_cache_entry(&db_pool, &key).await
-            }
-        }).await?;
+            async move { database::delete_cache_entry(&db_pool, &key).await }
+        })
+        .await?;
 
         Ok(())
     }
 
+    /// Calculate the time of expiration in seconds
+    #[inline]
+    fn calculate_expiry_secs(ttl: Option<Duration>) -> Result<Option<i64>, CacheError> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        ttl.map(|duration| -> Result<i64, CacheError> {
+            let expiration_u64 = now + duration.as_secs();
+            let expiration_i64 =
+                i64::try_from(expiration_u64).map_err(|_| CacheError::TtlValueOverflow)?;
+            Ok(expiration_i64)
+        })
+        .transpose()
+    }
+
+    fn update_memory_usage(&self, add: Option<usize>, sub: Option<usize>) {
+        {
+            let mut memory_usage = self.current_memory_usage.lock().unwrap();
+            if let Some(add) = add {
+                *memory_usage = memory_usage.saturating_add(add);
+            }
+            if let Some(sub) = sub {
+                *memory_usage = memory_usage.saturating_sub(sub);
+            }
+        }
+
+        self.evict_if_memory_pressure();
+    }
+
+    /// NON-BLOCKING; Lazily evicts items from the LRU cache if memory usage exceeds the limit
+    fn evict_if_memory_pressure(
+        &self,
+    ) {
+        let memory_cache_arc = self.memory_cache.clone();
+        let memory_usage_arc = self.current_memory_usage.clone();
+        let max_memory_mb = self.options.max_memory_mb;
+
+        tokio::spawn(async move {
+            // return on locking error because this is a non-blocking task so the
+            let mut memory_cache = match memory_cache_arc
+                .lock() {
+                Ok(cache) => cache,
+                Err(_) => return,
+            };
+            let mut memory_usage = match memory_usage_arc
+                .lock() {
+                Ok(usage) => usage,
+                Err(_) => return,
+            };
+
+            let max_memory_bytes = max_memory_mb * 1024 * 1024;
+            while *memory_usage > max_memory_bytes && memory_cache.len() > 1 {
+                // Evict the least recently used item
+                if let Some((evicted_key, evicted_value)) = memory_cache.pop_lru() {
+                    // Subtract the size of the evicted key and value from memory usage
+                    let evicted_size = evicted_key.len() + evicted_value.data.len();
+                    *memory_usage = memory_usage.saturating_sub(evicted_size);
+                    println!(
+                        "Evicted key '{}' due to memory pressure. Memory usage: {}/{} bytes",
+                        evicted_key, *memory_usage, max_memory_bytes
+                    );
+                } else {
+                    // No more items to evict
+                    break;
+                }
+            }
+        });
+
+    }
+
     /// Cleans up expired keys from the database
-    /// 
+    ///
     /// This method can be called manually to remove expired keys from both the memory cache and the database.
     /// It returns the number of keys that were removed.
     pub async fn cleanup_expired_keys(&self) -> Result<usize, CacheError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs() as i64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         let db_pool = self.db_pool.clone();
 
@@ -434,10 +459,9 @@ impl Cache {
         let expired_keys = retry_on_busy(move || {
             let db_pool = db_pool.clone();
             let now = now;
-            async move {
-                get_expired_keys(&db_pool, now).await
-            }
-        }).await?;
+            async move { database::get_expired_keys(&db_pool, now).await }
+        })
+        .await?;
 
         if expired_keys.is_empty() {
             return Ok(0);
@@ -446,21 +470,20 @@ impl Cache {
         println!("Found {} expired keys to clean up", expired_keys.len());
 
         // Extract key strings from CacheKey structs
-        let key_strings: Vec<String> = expired_keys.into_iter()
-            .map(|k| k.cache_key)
-            .collect();
+        let key_strings: Vec<String> = expired_keys.into_iter().map(|k| k.cache_key).collect();
 
         // Remove expired keys from memory cache
         {
-            let mut memory_cache = self.memory_cache.lock().map_err(|_| CacheError::MutexLockError)?;
-            let mut memory_usage = self.current_memory_usage.lock().map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_cache = self
+                .memory_cache
+                .lock()
+                .map_err(|_| CacheError::MutexLockError)?;
 
             for key in &key_strings {
                 if let Some(value) = memory_cache.pop(key) {
                     // Subtract the size of the key and value from memory usage
-                    let size = value.len() + key.len();
-                    *memory_usage = memory_usage.saturating_sub(size);
-                    println!("Removed expired key '{}' from memory cache during cleanup", key);
+                    let size = value.data.len() + key.len();
+                    self.update_memory_usage(None, Some(size));
                 }
             }
         }
@@ -472,18 +495,51 @@ impl Cache {
         retry_on_busy(move || {
             let db_pool = db_pool.clone();
             let key_strings = key_strings.clone();
-            async move {
-                delete_keys_batch(&db_pool, &key_strings).await
-            }
-        }).await?;
+            async move {database::delete_keys_batch(&db_pool, &key_strings).await}
+        })
+        .await?;
 
         println!("Cleaned up {} expired keys", count);
 
         Ok(count)
     }
-
 }
 
+/// Data structure representing a cache entry in the LRU cache. Time of expiration included.
+/// The DB stores the time of expiration as a separate column. DB helpers build this type
+/// when getting data
+#[derive(Debug, Clone)]
+struct CacheData {
+    pub data: Vec<u8>,
+    pub expires: Option<i64>,
+}
+
+impl CacheData {
+
+    /// True if the specified key has expired based on the provided expiration time in SECONDS
+    /// If the system time is before the unix epoch, it will return true (at that point all bets are
+    /// off anyway)
+    #[inline]
+    fn expired(&self) -> bool {
+        expired(self.expires)
+    }
+}
+
+/// True if the specified key has expired based on the provided expiration time in SECONDS
+/// If the system time is before the unix epoch, it will return true (at that point all bets are
+/// off anyway)
+#[inline]
+fn expired(expiry_secs: Option<i64>) -> bool {
+    if let Some(expiration) = expiry_secs {
+        let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs() as i64,
+            Err(_) => return true,
+        };
+        now > expiration
+    } else {
+        false
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -511,7 +567,9 @@ mod tests {
             db_path,
         };
 
-        let cache = Cache::new(options).await.expect("Failed to create cache for test");
+        let cache = Cache::new(options)
+            .await
+            .expect("Failed to create cache for test");
         println!("Successfully created cache instance");
 
         let key = "lib_rs_test_cleanup_expired_entries";
@@ -519,7 +577,10 @@ mod tests {
 
         // Set with 1 second TTL
         println!("Setting key '{}' with 1 second TTL", key);
-        cache.set(key, value, Some(Duration::from_secs(1))).await.expect("Failed to set key in test");
+        cache
+            .set(key, value, Some(Duration::from_secs(1)))
+            .await
+            .expect("Failed to set key in test");
 
         // Should be available immediately
         println!("Verifying key is available immediately after setting");
@@ -537,7 +598,10 @@ mod tests {
         println!("Attempting to retrieve expired key (may require multiple attempts)");
         for attempt in 1..=3 {
             println!("Attempt #{} to verify key has expired", attempt);
-            let result = cache.get(key).await.expect("Failed to get key in test attempt");
+            let result = cache
+                .get(key)
+                .await
+                .expect("Failed to get key in test attempt");
             if result.is_none() {
                 // Test passes if we get None
                 println!("SUCCESS: Key has expired and was properly removed from cache");
@@ -573,7 +637,9 @@ mod tests {
         };
 
         // Create a new cache instance
-        let cache = Cache::new(options).await.expect("Failed to create cache for test");
+        let cache = Cache::new(options)
+            .await
+            .expect("Failed to create cache for test");
         println!("Successfully created cache instance");
 
         // Add several keys with short TTLs
@@ -583,7 +649,10 @@ mod tests {
 
             // Set with 2 second TTL
             println!("Setting key '{}' with 2 second TTL", key);
-            cache.set(&key, &value, Some(Duration::from_secs(2))).await.expect("Failed to set key in test");
+            cache
+                .set(&key, &value, Some(Duration::from_secs(2)))
+                .await
+                .expect("Failed to set key in test");
 
             // Verify it was set correctly
             let result = cache.get(&key).await.expect("Failed to get key in test");
@@ -597,7 +666,10 @@ mod tests {
 
         // Manually run the cleanup
         println!("Running manual cleanup");
-        let cleaned_count = cache.cleanup_expired_keys().await.expect("Failed to run cleanup");
+        let cleaned_count = cache
+            .cleanup_expired_keys()
+            .await
+            .expect("Failed to run cleanup");
         println!("Cleaned up {} keys", cleaned_count);
         assert_eq!(cleaned_count, 5, "Should have cleaned up 5 keys");
 
@@ -605,7 +677,11 @@ mod tests {
         for i in 0..5 {
             let key = format!("manual_cleanup_test_key_{}", i);
             let result = cache.get(&key).await.expect("Failed to get key in test");
-            assert_eq!(result, None, "Key '{}' should have been removed by manual cleanup", key);
+            assert_eq!(
+                result, None,
+                "Key '{}' should have been removed by manual cleanup",
+                key
+            );
         }
 
         println!("SUCCESS: All keys were properly removed by manual cleanup");
