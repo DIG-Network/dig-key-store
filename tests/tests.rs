@@ -377,9 +377,15 @@ async fn test_cross_layer_synchronization() {
     println!("Deleting key '{}' in first cache", key);
     cache1.delete(key).await.unwrap();
 
-    // Try to get the deleted key from the second cache - it should be gone
-    println!("Attempting to get deleted key '{}' from second cache", key);
+    // Try to get the deleted key from the second cache - this will trigger lazy deletion from memory
+    println!("Attempt 1 to get deleted key '{}' from second cache (trigger lazy deletion).", key);
+    cache2.get(key).await.unwrap();
+    sleep(Duration::from_millis(2000)).await;
+
+    // Verify that the key is deleted from memory
+    println!("Attempt 2 to get deleted key '{}' from second cache post lazy deletion.", key);
     let result = cache2.get(key).await.unwrap();
+
     assert_eq!(
         result, None,
         "Key should be deleted in second cache as well"

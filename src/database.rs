@@ -355,7 +355,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
             DbError::DatabaseError(e)
         })?;
 
-    sqlx::query("PRAGMA busy_timeout = 5000;")
+    sqlx::query("PRAGMA busy_timeout = 50;")
         .execute(&db_pool)
         .await
         .map_err(|e| {
