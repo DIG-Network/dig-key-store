@@ -98,7 +98,7 @@ jobs:
         run: rustup component add rustfmt && cargo fmt --all -- --check
 
   build:
-    name: Build binaries - ${{ matrix.settings.target }} - node@${{ env.NODE_VERSION }}
+    name: Build binaries - ${{ matrix.settings.target }} - node
     needs: rust-checks
     strategy:
       fail-fast: false
