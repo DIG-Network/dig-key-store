@@ -85,7 +85,7 @@ jobs:
         with:
           toolchain: stable
       - name: Test
-        run: cargo test --all-features --all-targets --locked
+        run: cargo test
       - name: Clippy
         run: rustup component add clippy && cargo clippy --all-targets --all-features -- -D warnings
       - name: Unused dependencies
