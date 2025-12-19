@@ -713,9 +713,9 @@ mod tests {
 
         for db_path in db_paths {
             if std::path::Path::new(&db_path).exists() {
-                std::fs::remove_file(&db_path).expect(
-                    format!("Failed to remove existing database file: {}", db_path).as_str(),
-                );
+                std::fs::remove_file(&db_path).unwrap_or_else(|_| {
+                    panic!("Failed to remove existing database file: {}", db_path)
+                })
             }
         }
 

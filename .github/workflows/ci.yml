@@ -92,6 +92,8 @@ jobs:
           cargo machete
       - name: Fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --all-features --all-targets --locked
 
   build:
     name: Build binaries - ${{ matrix.settings.target }} - node@22

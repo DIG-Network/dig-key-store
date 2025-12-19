@@ -28,9 +28,25 @@ jobs:
         id: set
         run: echo "merge_sha=${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_OUTPUT
 
+  rust-tests:
+    name: Rust tests
+    needs: guard
+    if: ${{ needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.merge_sha }}
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Run cargo tests
+        run: cargo test --all-features --all-targets --locked
+
   build:
     name: Build binaries - ${{ matrix.settings.target }} - node@22
-    needs: guard
+    needs: [guard, rust-tests]
     if: ${{ needs.guard.result == 'success' }}
     strategy:
       fail-fast: false
