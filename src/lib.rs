@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
-use sqlx::{Pool, Sqlite, SqlitePool};
+use sqlx::{Pool, Sqlite};
 use thiserror::Error;
 
 mod database;
@@ -526,7 +526,7 @@ impl Cache {
                 if let Some(value) = memory_cache.pop(key) {
                     // Subtract the size of the key and value from memory usage
                     let size = value.data.len() + key.len();
-                    self.update_memory_usage(None, Some(size));
+                    self.update_memory_usage(None, Some(size))?;
                 }
             }
         }

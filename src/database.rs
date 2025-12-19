@@ -12,13 +12,13 @@ static MIGRATOR: Migrator = sqlx::migrate!();
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
+    Database(#[from] sqlx::Error),
 
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
 
     #[error("Pool error: {0}")]
-    PoolError(String),
+    Pool(String),
 }
 
 pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
@@ -61,11 +61,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     if is_sqlite_busy_error(&e) {
                         init_retry_count += 1;
                         if init_retry_count >= max_init_retries {
-                            return Err(DbError::DatabaseError(e));
+                            return Err(DbError::Database(e));
                         }
                         continue;
                     }
-                    return Err(DbError::DatabaseError(e));
+                    return Err(DbError::Database(e));
                 }
             };
 
@@ -87,11 +87,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 if is_sqlite_busy_error(&e) {
                     init_retry_count += 1;
                     if init_retry_count >= max_init_retries {
-                        return Err(DbError::DatabaseError(e));
+                        return Err(DbError::Database(e));
                     }
                     continue;
                 }
-                return Err(DbError::DatabaseError(e));
+                return Err(DbError::Database(e));
             }
         };
 
@@ -118,11 +118,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                         if is_sqlite_busy_error(&e) {
                             init_retry_count += 1;
                             if init_retry_count >= max_init_retries {
-                                return Err(DbError::DatabaseError(e));
+                                return Err(DbError::Database(e));
                             }
                             continue;
                         }
-                        return Err(DbError::DatabaseError(e));
+                        return Err(DbError::Database(e));
                     }
                 };
 
@@ -133,7 +133,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     println!("Warning: Migrations succeeded but cache table wasn't created");
                     init_retry_count += 1;
                     if init_retry_count >= max_init_retries {
-                        return Err(DbError::PoolError(
+                        return Err(DbError::Pool(
                             "Migrations succeeded but cache table wasn't created".to_string(),
                         ));
                     }
@@ -148,7 +148,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     println!("Database is busy during migration, retrying entire initialization");
                     init_retry_count += 1;
                     if init_retry_count >= max_init_retries {
-                        return Err(DbError::DatabaseError(sqlx_error));
+                        return Err(DbError::Database(sqlx_error));
                     }
                     continue;
                 }
@@ -159,7 +159,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
 
                     if let Some(code) = db_err.code() {
                         // SQLite error code 1555 is "UNIQUE constraint failed"
-                        if code.to_string() == "1555" {
+                        if code == "1555" {
                             println!(
                                 "Unique constraint error during migration: {}",
                                 db_err.message()
@@ -179,11 +179,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                                     if is_sqlite_busy_error(&e) {
                                         init_retry_count += 1;
                                         if init_retry_count >= max_init_retries {
-                                            return Err(DbError::DatabaseError(e));
+                                            return Err(DbError::Database(e));
                                         }
                                         continue;
                                     }
-                                    return Err(DbError::DatabaseError(e));
+                                    return Err(DbError::Database(e));
                                 }
                             };
 
@@ -198,7 +198,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                                 );
                                 init_retry_count += 1;
                                 if init_retry_count >= max_init_retries {
-                                    return Err(DbError::DatabaseError(sqlx_error));
+                                    return Err(DbError::Database(sqlx_error));
                                 }
                                 continue;
                             }
@@ -210,7 +210,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 println!("Error during migration: {:?}", sqlx_error);
                 init_retry_count += 1;
                 if init_retry_count >= max_init_retries {
-                    return Err(DbError::DatabaseError(sqlx_error));
+                    return Err(DbError::Database(sqlx_error));
                 }
                 continue;
             }
@@ -223,11 +223,9 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
     println!("Setting up database connection pool for: {}", db_path);
 
     // Ensure the directory for the database exists
-    if let Some(parent) = Path::new(db_path).parent() {
-        if !parent.exists() {
-            println!("Creating directory for database: {:?}", parent);
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = Path::new(db_path).parent() && !parent.exists() {
+        println!("Creating directory for database: {:?}", parent);
+        std::fs::create_dir_all(parent)?;
     }
 
     // Check if the database exists, if not create it
@@ -254,7 +252,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     retry_count += 1;
                     if retry_count >= max_retries {
                         println!("Max retries reached while creating database");
-                        return Err(DbError::DatabaseError(e));
+                        return Err(DbError::Database(e));
                     }
                     println!(
                         "Database is busy/locked during creation, retrying in 10ms (attempt {}/{})",
@@ -272,7 +270,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     }
                 } else {
                     // For any other error, return it
-                    return Err(DbError::DatabaseError(e));
+                    return Err(DbError::Database(e));
                 }
             }
         }
@@ -311,7 +309,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 } else {
                     // For any other error, return it
                     println!("Error creating database connection pool: {}", e);
-                    return Err(DbError::PoolError(e.to_string()));
+                    return Err(DbError::Pool(e.to_string()));
                 }
             }
         }
@@ -324,7 +322,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
             max_retries
         );
         println!("{}", msg);
-        DbError::PoolError(msg)
+        DbError::Pool(msg)
     })?;
 
     println!("Database connection pool created successfully");
@@ -336,7 +334,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         .await
         .map_err(|e| {
             println!("Error setting journal_mode pragma: {}", e);
-            DbError::DatabaseError(e)
+            DbError::Database(e)
         })?;
 
     sqlx::query("PRAGMA synchronous = NORMAL;")
@@ -344,7 +342,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         .await
         .map_err(|e| {
             println!("Error setting synchronous pragma: {}", e);
-            DbError::DatabaseError(e)
+            DbError::Database(e)
         })?;
 
     sqlx::query("PRAGMA cache_size = 1000;")
@@ -352,7 +350,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         .await
         .map_err(|e| {
             println!("Error setting cache_size pragma: {}", e);
-            DbError::DatabaseError(e)
+            DbError::Database(e)
         })?;
 
     sqlx::query("PRAGMA busy_timeout = 50;")
@@ -360,7 +358,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         .await
         .map_err(|e| {
             println!("Error setting busy_timeout pragma: {}", e);
-            DbError::DatabaseError(e)
+            DbError::Database(e)
         })?;
 
     println!("SQLite configured for concurrent access");
