@@ -72,6 +72,16 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
+      - name: Ensure npm and Cargo versions match (release)
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          CRATE_VER=$(grep -m1 '^version\s*=\s*"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Detected package.json version: $PKG_VER"
+          echo "Detected Cargo.toml version: $CRATE_VER"
+          if [ "$PKG_VER" != "$CRATE_VER" ]; then
+            echo "Version mismatch: package.json ($PKG_VER) != Cargo.toml ($CRATE_VER). Aborting release." >&2
+            exit 1
+          fi
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         if: ${{ !matrix.settings.docker }}

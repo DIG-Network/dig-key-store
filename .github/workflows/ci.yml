@@ -54,6 +54,12 @@ jobs:
           echo "Main package.json version: $MAIN_PKG_VER"
           echo "PR Cargo.toml version: $PR_CRATE_VER"
           echo "Main Cargo.toml version: $MAIN_CRATE_VER"
+      - name: Ensure npm and Cargo versions match on PR
+        run: |
+          if [ "${{ steps.versions.outputs.pr_pkg_ver }}" != "${{ steps.versions.outputs.pr_crate_ver }}" ]; then
+            echo "package.json version (${{ steps.versions.outputs.pr_pkg_ver }}) must match Cargo.toml version (${{ steps.versions.outputs.pr_crate_ver }}) on PR (develop)." >&2
+            exit 1
+          fi
       - name: Ensure versions increased
         run: |
           cmp_versions () { [ "$1" = "$2" ] && return 1; printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1 | grep -q "^$2$"; }
