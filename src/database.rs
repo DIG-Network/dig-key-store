@@ -39,7 +39,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         let db_connection = match setup_db_connection(db_path).await {
             Ok(conn) => conn,
             Err(e) => {
-                println!("Error setting up database connection: {:?}", e);
+                eprintln!("Error setting up database connection: {:?}", e);
                 init_retry_count += 1;
                 if init_retry_count >= max_init_retries {
                     return Err(e);
@@ -57,7 +57,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
             {
                 Ok(result) => result.is_some(),
                 Err(e) => {
-                    println!("Error checking if cache table exists: {:?}", e);
+                    eprintln!("Error checking if cache table exists: {:?}", e);
                     if is_sqlite_busy_error(&e) {
                         init_retry_count += 1;
                         if init_retry_count >= max_init_retries {
@@ -70,12 +70,11 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
             };
 
         if cache_table_exists {
-            println!("Cache table already exists, skipping migrations");
             return Ok(db_connection);
         }
 
         // Check if the _sqlx_migrations table exists
-        let migration_table_exists = match sqlx::query(
+        match sqlx::query(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
         )
         .fetch_optional(&db_connection)
@@ -83,7 +82,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         {
             Ok(result) => result.is_some(),
             Err(e) => {
-                println!("Error checking if migrations table exists: {:?}", e);
+                eprintln!("Error checking if migrations table exists: {:?}", e);
                 if is_sqlite_busy_error(&e) {
                     init_retry_count += 1;
                     if init_retry_count >= max_init_retries {
@@ -95,16 +94,9 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
             }
         };
 
-        if migration_table_exists {
-            println!("Migration table exists but cache table doesn't - this is unexpected");
-            println!("Will try to run migrations anyway");
-        }
-
         // Try to run migrations
         match MIGRATOR.run(&db_connection).await {
             Ok(_) => {
-                println!("Migrations applied successfully");
-
                 // Verify that the cache table was created
                 let cache_table_created = match sqlx::query(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='cache'",
@@ -114,7 +106,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 {
                     Ok(result) => result.is_some(),
                     Err(e) => {
-                        println!("Error checking if cache table was created: {:?}", e);
+                        eprintln!("Error checking if cache table was created: {:?}", e);
                         if is_sqlite_busy_error(&e) {
                             init_retry_count += 1;
                             if init_retry_count >= max_init_retries {
@@ -127,10 +119,9 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 };
 
                 if cache_table_created {
-                    println!("Cache table created successfully");
                     return Ok(db_connection);
                 } else {
-                    println!("Warning: Migrations succeeded but cache table wasn't created");
+                    eprintln!("Warning: Migrations succeeded but cache table wasn't created");
                     init_retry_count += 1;
                     if init_retry_count >= max_init_retries {
                         return Err(DbError::Pool(
@@ -175,7 +166,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                             {
                                 Ok(result) => result.is_some(),
                                 Err(e) => {
-                                    println!("Error checking if cache table exists after constraint error: {:?}", e);
+                                    eprintln!("Error checking if cache table exists after constraint error: {:?}", e);
                                     if is_sqlite_busy_error(&e) {
                                         init_retry_count += 1;
                                         if init_retry_count >= max_init_retries {
@@ -188,12 +179,9 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                             };
 
                             if cache_table_exists {
-                                println!(
-                                    "Cache table exists after constraint error, proceeding with connection"
-                                );
                                 return Ok(db_connection);
                             } else {
-                                println!(
+                                eprintln!(
                                     "Cache table doesn't exist after constraint error, retrying entire initialization"
                                 );
                                 init_retry_count += 1;
@@ -207,7 +195,7 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 }
 
                 // For any other error, retry the whole process
-                println!("Error during migration: {:?}", sqlx_error);
+                eprintln!("Error during migration: {:?}", sqlx_error);
                 init_retry_count += 1;
                 if init_retry_count >= max_init_retries {
                     return Err(DbError::Database(sqlx_error));
@@ -220,11 +208,10 @@ pub async fn init(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
 
 /// Sets up a SQLite database connection pool
 async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
-    println!("Setting up database connection pool for: {}", db_path);
-
     // Ensure the directory for the database exists
-    if let Some(parent) = Path::new(db_path).parent() && !parent.exists() {
-        println!("Creating directory for database: {:?}", parent);
+    if let Some(parent) = Path::new(db_path).parent()
+        && !parent.exists()
+    {
         std::fs::create_dir_all(parent)?;
     }
 
@@ -240,10 +227,8 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         .await
         .unwrap_or(false)
     {
-        println!("Database does not exist, creating it");
         match Sqlite::create_database(&basic_db_url).await {
             Ok(_) => {
-                println!("Database created successfully");
                 break;
             }
             Err(e) => {
@@ -251,10 +236,9 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                 if is_sqlite_busy_error(&e) {
                     retry_count += 1;
                     if retry_count >= max_retries {
-                        println!("Max retries reached while creating database");
                         return Err(DbError::Database(e));
                     }
-                    println!(
+                    eprintln!(
                         "Database is busy/locked during creation, retrying in 10ms (attempt {}/{})",
                         retry_count, max_retries
                     );
@@ -265,7 +249,6 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                         .await
                         .unwrap_or(false)
                     {
-                        println!("Database now exists, another process must have created it");
                         break;
                     }
                 } else {
@@ -308,7 +291,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 } else {
                     // For any other error, return it
-                    println!("Error creating database connection pool: {}", e);
+                    eprintln!("Error creating database connection pool: {}", e);
                     return Err(DbError::Pool(e.to_string()));
                 }
             }
@@ -324,8 +307,6 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
         println!("{}", msg);
         DbError::Pool(msg)
     })?;
-
-    println!("Database connection pool created successfully");
 
     // Configure SQLite for better concurrent access
     // Execute pragmas to set journal mode to WAL and other optimizations
@@ -360,8 +341,6 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
             println!("Error setting busy_timeout pragma: {}", e);
             DbError::Database(e)
         })?;
-
-    println!("SQLite configured for concurrent access");
 
     Ok(db_pool)
 }

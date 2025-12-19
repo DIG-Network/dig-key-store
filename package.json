@@ -11,7 +11,7 @@
     "build": "napi build -o napi-build --features napi-bindings --platform --release --js index.js",
     "build:debug": "napi build -o napi-build --features napi-bindings --platform --js index.cjs",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "tsc tests/tests.mts && ava",
+    "test": "npm run build && tsc tests/tests.mts && ava",
     "universal": "napi universal",
     "version": "napi version"
   },

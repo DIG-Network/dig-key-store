@@ -48,42 +48,34 @@ mod napi_impl {
         }
 
         #[napi]
-        pub fn set(&self, key: String, value: Buffer, ttl_ms: Option<u32>) -> napi::Result<()> {
+        pub async fn set(
+            &self,
+            key: String,
+            value: Buffer,
+            ttl_ms: Option<u32>,
+        ) -> napi::Result<()> {
             let ttl = ttl_ms.map(|ms| Duration::from_millis(ms as u64));
             let cache = self.cache.clone();
             let value_vec = value.to_vec();
 
-            RUNTIME.with(|rt| {
-                rt.block_on(async {
-                    cache
-                        .set(&key, &value_vec, ttl)
-                        .await
-                        .map_err(convert_error)
-                })
-            })
+            cache
+                .set(&key, &value_vec, ttl)
+                .await
+                .map_err(convert_error)
         }
 
         #[napi]
-        pub fn get(&self, key: String) -> napi::Result<Option<Buffer>> {
-            let cache = self.cache.clone();
-
-            RUNTIME.with(|rt| {
-                rt.block_on(async {
-                    let result = cache.get(&key).await.map_err(convert_error)?;
-                    match result {
-                        Some(value) => Ok(Some(Buffer::from(value))),
-                        None => Ok(None),
-                    }
-                })
-            })
+        pub async fn get(&self, key: String) -> napi::Result<Option<Buffer>> {
+            let result = self.cache.get(&key).await.map_err(convert_error)?;
+            match result {
+                Some(value) => Ok(Some(Buffer::from(value))),
+                None => Ok(None),
+            }
         }
 
         #[napi]
-        pub fn delete(&self, key: String) -> napi::Result<()> {
-            let cache = self.cache.clone();
-
-            RUNTIME
-                .with(|rt| rt.block_on(async { cache.delete(&key).await.map_err(convert_error) }))
+        pub async fn delete(&self, key: String) -> napi::Result<()> {
+            self.cache.delete(&key).await.map_err(convert_error)
         }
     }
 }

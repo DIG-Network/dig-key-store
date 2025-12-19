@@ -403,7 +403,6 @@ impl Cache {
 
     /// Updates the last accessed time for the specified key. This should be called in a non-blocking task.
     async fn update_last_accessed(db_pool: &Pool<Sqlite>, key: &str) -> Result<(), CacheError> {
-        println!("Updating last accessed time for key: {}", key);
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
         retry_on_busy(move || {
@@ -475,10 +474,6 @@ impl Cache {
                     // Subtract the size of the evicted key and value from memory usage
                     let evicted_size = evicted_key.len() + evicted_value.data.len();
                     *memory_usage = memory_usage.saturating_sub(evicted_size);
-                    println!(
-                        "Evicted key '{}' due to memory pressure. Memory usage: {}/{} bytes",
-                        evicted_key, *memory_usage, max_memory_bytes
-                    );
                 } else {
                     // No more items to evict
                     break;
@@ -505,11 +500,8 @@ impl Cache {
         .await?;
 
         if expired_keys.is_empty() {
-            println!("No expired keys to clean up");
             return Ok(0);
         }
-
-        println!("Found {} expired keys to clean up", expired_keys.len());
 
         // Extract key strings from CacheKey structs
         let key_strings: Vec<String> = expired_keys.into_iter().map(|k| k.cache_key).collect();
@@ -541,8 +533,6 @@ impl Cache {
             async move { database::delete_keys_batch(&db_pool, &key_strings).await }
         })
         .await?;
-
-        println!("Cleaned up {} expired keys", count);
 
         Ok(count)
     }

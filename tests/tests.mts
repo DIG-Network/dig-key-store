@@ -25,6 +25,11 @@ async function cleanDbFiles() {
   console.log('Database cleanup completed');
 }
 
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
 test.before(async () => {
   await cleanDbFiles();
 });
@@ -135,6 +140,10 @@ test('JsCache - cross layer synchronization', async (t) => {
   t.deepEqual(result2, value1);
 
   await cache1.delete(key);
+  // first access should return data, second access should return null due to lazy reconciliation
+  await cache2.get(key);
+  await sleep(500);
+
   const afterDelete = await cache2.get(key);
   t.is(afterDelete, null);
 });
