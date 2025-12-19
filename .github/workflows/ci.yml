@@ -4,7 +4,7 @@ env:
   DEBUG: napi:*
   APP_NAME: dig-key-value-store
   MACOSX_DEPLOYMENT_TARGET: '10.13'
-  RUST_TOOLCHAIN: '1.85.0'
+  RUST_TOOLCHAIN: '1.90.0'
   NODE_VERSION: '22.17.0'
 
 permissions:
