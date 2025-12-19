@@ -1,0 +1,242 @@
+name: Release on develop -> main merge
+
+env:
+  DEBUG: napi:*
+  APP_NAME: dig-key-value-store
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+
+permissions:
+  contents: write
+  id-token: write
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  guard:
+    name: Ensure merged PR is develop -> main
+    if: >-
+      ${{ github.event.pull_request.merged == true &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.ref == 'develop' }}
+    runs-on: ubuntu-latest
+    outputs:
+      merge_sha: ${{ steps.set.outputs.merge_sha }}
+    steps:
+      - name: Set merge SHA
+        id: set
+        run: echo "merge_sha=${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build binaries - ${{ matrix.settings.target }} - node@22
+    needs: guard
+    if: ${{ needs.guard.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
+            build: |
+              set -e &&
+              cd /build && cargo update -p base64ct --precise 1.6.0 || true &&
+              cd /build && npm ci && npm run build -- --target x86_64-unknown-linux-gnu &&
+              strip /build/napi-build/*.node || true
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
+            build: |
+              set -e &&
+              cd /build && cargo update -p base64ct --precise 1.6.0 || true &&
+              cd /build && npm ci && npm run build -- --target aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.merge_sha }}
+      - name: Setup node
+        uses: actions/setup-node@v4
+        if: ${{ !matrix.settings.docker }}
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.settings.docker }}
+        with:
+          toolchain: stable
+          targets: ${{ matrix.settings.target }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            .cargo-cache
+            target/
+          key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+      - name: Install dependencies
+        if: ${{ !matrix.settings.docker }}
+        run: npm ci
+      - name: Build in docker
+        uses: addnab/docker-run-action@v3
+        if: ${{ matrix.settings.docker }}
+        with:
+          image: ${{ matrix.settings.docker }}
+          options: '--user 0:0 -v ${{ github.workspace }}/.cargo-cache/git/db:/usr/local/cargo/git/db -v ${{ github.workspace }}/.cargo/registry/cache:/usr/local/cargo/registry/cache -v ${{ github.workspace }}/.cargo/registry/index:/usr/local/cargo/registry/index -v ${{ github.workspace }}:/build -w /build'
+          run: ${{ matrix.settings.build }}
+      - name: Pin base64ct for stable toolchain
+        if: ${{ !matrix.settings.docker }}
+        run: cargo update -p base64ct --precise 1.6.0 || true
+        shell: bash
+      - name: Build
+        if: ${{ !matrix.settings.docker }}
+        run: ${{ matrix.settings.build }}
+        shell: bash
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: napi-build/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+
+  test-bindings:
+    name: Test bindings ${{ matrix.settings.target }} - node@22
+    needs: build
+    if: ${{ needs.guard.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.merge_sha }}
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: .
+      - name: Run tests
+        run: npm test
+
+  create-release:
+    name: Create GitHub Release
+    needs: [guard, test-bindings]
+    if: ${{ needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.merge_sha }}
+      - name: Read version
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+      - name: Create tag if missing
+        run: |
+          if ! git rev-parse "${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            git tag "${{ steps.ver.outputs.version }}" ${{ needs.guard.outputs.merge_sha }}
+            git push origin "${{ steps.ver.outputs.version }}"
+          fi
+      - name: Generate release notes
+        id: notes
+        uses: release-drafter/release-drafter@v6
+        with:
+          disable-autolabeler: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: Release ${{ steps.ver.outputs.version }}
+          body: ${{ steps.notes.outputs.body || '' }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    name: Publish to NPM
+    needs: [guard, create-release]
+    if: ${{ needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.merge_sha }}
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Move artifacts into package
+        run: |
+          mkdir -p napi-build
+          find artifacts -name '*.node' -exec cp {} napi-build/ \;
+          npm run artifacts
+      - name: List npm package content
+        run: ls -R ./npm || true
+        shell: bash
+      - name: Publish to NPM
+        run: |
+          echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" >> ~/.npmrc
+          npm config set provenance true
+          npm publish --access public || npm publish --tag next --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: [guard, create-release]
+    if: ${{ needs.guard.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.merge_sha }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo login $CARGO_REGISTRY_TOKEN
+          cargo publish --no-verify --allow-dirty
