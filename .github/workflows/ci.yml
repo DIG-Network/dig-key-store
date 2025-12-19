@@ -170,11 +170,15 @@ jobs:
         if: ${{ !matrix.settings.docker }}
         run: ${{ matrix.settings.build }}
         shell: bash
+      - name: List build outputs
+        run: |
+          echo "Contents of napi-build:" && ls -lah napi-build || true
+        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: napi-build/${{ env.APP_NAME }}.*.node
+          path: napi-build/index.*.node
           if-no-files-found: error
 
   test-bindings:

@@ -21,7 +21,7 @@
   },
   "files": [
     "napi-build/index.d.ts",
-    "napi-build/index.darwin-x64.node",
+    "napi-build/*.node",
     "napi-build/index.js"
   ],
   "napi": {
