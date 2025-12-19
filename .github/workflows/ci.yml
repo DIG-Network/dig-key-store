@@ -82,7 +82,7 @@ jobs:
           fi
 
   rust-checks:
-    name: Rust checks
+    name: Rust checks (rustc ${{ env.RUST_TOOLCHAIN }})
     runs-on: ubuntu-latest
     needs: validate-pr
     steps:
