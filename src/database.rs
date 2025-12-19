@@ -291,7 +291,7 @@ async fn setup_db_connection(db_path: &str) -> Result<Pool<Sqlite>, DbError> {
 
     while db_pool.is_none() && retry_count < max_retries {
         match SqlitePoolOptions::new()
-            .max_connections(5) // Increased from 1 to 5 to allow concurrent access
+            .max_connections(5)
             .acquire_timeout(std::time::Duration::from_secs(10))
             .connect(&db_url)
             .await

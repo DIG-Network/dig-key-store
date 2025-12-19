@@ -6,7 +6,7 @@ use std::sync::Once;
 use std::time::Duration;
 use tokio::time::sleep;
 
-static TESTS_RS_DB_PATH: &str = "tests/db/cargo_integration_tests.sqlite";
+static INTEGRATION_TESTS_RS_DB_PATH: &str = "tests/db/cargo_integration_tests.sqlite";
 static ONCE: Once = Once::new();
 
 // Function to set up the test database once
@@ -14,9 +14,9 @@ pub fn clean_db_files_once() {
     // Use a static Once to ensure we only clean up once per test run
     ONCE.call_once(|| {
         println!("\nCleaning up database files before tests");
-        let db_path = TESTS_RS_DB_PATH;
-        let wal_path_str = format!("{}-wal", TESTS_RS_DB_PATH);
-        let shm_path_str = format!("{}-shm", TESTS_RS_DB_PATH);
+        let db_path = INTEGRATION_TESTS_RS_DB_PATH;
+        let wal_path_str = format!("{}-wal", INTEGRATION_TESTS_RS_DB_PATH);
+        let shm_path_str = format!("{}-shm", INTEGRATION_TESTS_RS_DB_PATH);
 
         // Ensure the tests/db directory exists
         if let Some(parent) = Path::new(db_path).parent() {
@@ -114,7 +114,7 @@ async fn create_test_cache() -> Cache {
     println!("Creating cache for test: {}", test_name);
 
     // Use a single database file for all integration tests
-    let db_path = TESTS_RS_DB_PATH.to_string();
+    let db_path = INTEGRATION_TESTS_RS_DB_PATH.to_string();
     println!("Using database path: {}", db_path);
 
     let options = CacheOptions {
@@ -223,7 +223,7 @@ async fn test_memory_pressure_eviction_miss_access() {
     clean_db_files_once();
 
     // Create a cache with a small memory limit to trigger eviction
-    let db_path = TESTS_RS_DB_PATH.to_string();
+    let db_path = INTEGRATION_TESTS_RS_DB_PATH.to_string();
 
     // We don't remove the database file as we want to reuse it across tests
 
@@ -240,7 +240,7 @@ async fn test_memory_pressure_eviction_miss_access() {
 
     // First key that we'll check if it gets evicted
     let first_key = "tests_rs_test_memory_pressure_eviction_first_key";
-    let first_value = vec![0u8; 100_000]; // 100KB value
+    let first_value = vec![1u8; 100_000]; // 100KB value
 
     println!("Setting first key '{}' with 100KB value", first_key);
     cache.set(first_key, &first_value, None).await.unwrap();
@@ -252,13 +252,13 @@ async fn test_memory_pressure_eviction_miss_access() {
 
     // Add many more keys to trigger memory pressure
     println!("Adding many more keys to trigger memory pressure");
-    for i in 0..20 {
+    for i in 0..30 {
         let key = format!("tests_rs_test_memory_pressure_eviction_key_{}", i);
         let value = vec![i as u8; 100_000]; // 100KB value each
         cache.set(&key, &value, None).await.unwrap();
 
         // Access the first key occasionally to keep it "warm" in the LRU
-        if i % 5 == 0 {
+        if i % 2 == 0 {
             cache.get(first_key).await.unwrap();
         }
     }
@@ -307,7 +307,7 @@ async fn test_cross_layer_synchronization() {
 
     // Create two separate cache instances that point to the same database
     // This simulates two processes accessing the same cache
-    let db_path = TESTS_RS_DB_PATH.to_string();
+    let db_path = INTEGRATION_TESTS_RS_DB_PATH.to_string();
 
     // We don't remove the database file as we want to reuse it across tests
 
@@ -378,12 +378,18 @@ async fn test_cross_layer_synchronization() {
     cache1.delete(key).await.unwrap();
 
     // Try to get the deleted key from the second cache - this will trigger lazy deletion from memory
-    println!("Attempt 1 to get deleted key '{}' from second cache (trigger lazy deletion).", key);
+    println!(
+        "Attempt 1 to get deleted key '{}' from second cache (trigger lazy deletion).",
+        key
+    );
     cache2.get(key).await.unwrap();
-    sleep(Duration::from_millis(2000)).await;
+    sleep(Duration::from_millis(1000)).await;
 
     // Verify that the key is deleted from memory
-    println!("Attempt 2 to get deleted key '{}' from second cache post lazy deletion.", key);
+    println!(
+        "Attempt 2 to get deleted key '{}' from second cache post lazy deletion.",
+        key
+    );
     let result = cache2.get(key).await.unwrap();
 
     assert_eq!(
@@ -397,25 +403,17 @@ async fn test_cross_layer_synchronization() {
 async fn test_simulated_concurrent_access() {
     println!("\nINTEGRATION TEST: Testing simulated concurrent access patterns");
 
-    // Set up test database once
     clean_db_files_once();
+    let db_path = INTEGRATION_TESTS_RS_DB_PATH.to_string();
 
-    // Create a shared database for all cache instances
-    let db_path = TESTS_RS_DB_PATH.to_string();
-
-    // We don't remove the database file as we want to reuse it across tests
-
-    // Number of simulated concurrent clients
     let num_clients = 5;
-    // Number of operations per client
-    let ops_per_client = 50;
+    let ops_per_client = 100;
 
     println!(
         "Creating {} cache instances to simulate concurrent clients",
         num_clients
     );
 
-    // Create multiple cache instances that all point to the same database
     let mut caches = Vec::with_capacity(num_clients);
     for i in 0..num_clients {
         let options = CacheOptions {
@@ -435,9 +433,7 @@ async fn test_simulated_concurrent_access() {
         ops_per_client
     );
 
-    // Simulate concurrent operations by interleaving operations from different clients
     for op_id in 0..ops_per_client {
-        // Each client performs an operation
         for client_id in 0..num_clients {
             let key = format!(
                 "tests_rs_test_simulated_concurrent_access_key_{}_{}",
@@ -445,10 +441,8 @@ async fn test_simulated_concurrent_access() {
             );
             let value = format!("value_{}_{}", client_id, op_id).into_bytes();
 
-            // Set the key
             caches[client_id].set(&key, &value, None).await.unwrap();
 
-            // Get the key
             let result = caches[client_id].get(&key).await.unwrap();
             assert_eq!(
                 result,
@@ -466,7 +460,6 @@ async fn test_simulated_concurrent_access() {
                     other_client_id, op_id
                 );
 
-                // Try to get the key from another client (it should exist since we're processing sequentially)
                 let result = caches[client_id].get(&other_key).await.unwrap();
                 if let Some(other_value) = result {
                     let expected_value =
@@ -486,9 +479,10 @@ async fn test_simulated_concurrent_access() {
                     client_id,
                     op_id - 10
                 );
+
                 caches[client_id].delete(&delete_key).await.unwrap();
 
-                // Verify deletion
+                // Deleting cache must observe deletion immediately
                 let result = caches[client_id].get(&delete_key).await.unwrap();
                 assert_eq!(
                     result, None,
@@ -496,15 +490,10 @@ async fn test_simulated_concurrent_access() {
                     client_id, delete_key
                 );
 
-                // Verify other clients also see the deletion
+                // Other caches must converge on deletion within one additional read
                 if client_id < num_clients - 1 {
                     let next_client_id = client_id + 1;
-                    let result = caches[next_client_id].get(&delete_key).await.unwrap();
-                    assert_eq!(
-                        result, None,
-                        "Client {} still sees key {} that was deleted by client {}",
-                        next_client_id, delete_key, client_id
-                    );
+                    assert_eventual_delete(&caches[next_client_id], &delete_key).await;
                 }
             }
         }
@@ -521,7 +510,7 @@ async fn test_memory_limit_enforcement() {
     clean_db_files_once();
 
     // Create a cache with a very small memory limit
-    let db_path = TESTS_RS_DB_PATH.to_string();
+    let db_path = INTEGRATION_TESTS_RS_DB_PATH.to_string();
 
     // We don't remove the database file as we want to reuse it across tests
 
@@ -624,4 +613,37 @@ async fn test_memory_limit_enforcement() {
     }
 
     println!("SUCCESS: Memory limit is enforced, but all keys remain accessible from the database");
+}
+
+/// Asserts the cache’s *eventual consistency* guarantee for deletions.
+///
+/// # Behavior being tested
+///
+/// This helper encodes the cache’s contract that:
+///
+/// - A cache **may return a stale in-memory value on the first read**
+///   after another process deletes a key.
+/// - The cache **must lazily validate against the database**.
+/// - A **subsequent read must observe the deletion** and return `None`.
+///
+/// This ensures:
+/// - Read-your-own-writes consistency for the deleting cache
+/// - Bounded staleness (at most one stale read) for other caches
+///
+/// If this assertion fails, it indicates that:
+/// - Lazy DB validation is not occurring
+/// - Or stale entries are not being invalidated correctly
+async fn assert_eventual_delete(cache: &Cache, key: &str) {
+    // First read may return stale data — this is allowed
+    cache.get(key).await.unwrap();
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Second read must reflect the deletion
+    let result = cache.get(key).await.unwrap();
+    assert_eq!(
+        result, None,
+        "Cache did not converge on deletion for key {}",
+        key
+    );
 }

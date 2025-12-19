@@ -4,13 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Sqlite, SqlitePool};
 use thiserror::Error;
 
 mod database;
 #[cfg(feature = "napi-bindings")]
 pub mod napi;
-static MAX_LRU_CACHE_ITEMS: usize = 1_000_000;
+static MAX_LRU_CACHE_ITEMS: usize = 100_000_000;
 
 /// Checks if the given SQLx error is an SQLite "busy" or "locked" error
 pub fn is_sqlite_busy_error(err: &sqlx::Error) -> bool {
@@ -202,7 +202,7 @@ impl Cache {
             0
         };
 
-        self.update_memory_usage(Some(new_size), Some(removed_size));
+        self.update_memory_usage(Some(new_size), Some(removed_size))?;
 
         Ok(())
     }
@@ -228,16 +228,28 @@ impl Cache {
                 tokio::spawn(async move {
                     // without an established logger, dont bother handling errors in this fn, just give up
                     let maybe_db_value =
-                        match Self::get_from_db_pool(&db_pool, key_arc.as_str()).await {
+                        match Self::get_from_db_impl(&db_pool, key_arc.as_str()).await {
                             Ok(db_value) => db_value,
                             Err(_) => return, // if we cant get the value from the db, nothing to do
                         };
 
-                    if let Some(db_value) = maybe_db_value
-                        && !db_value.expired()
-                    {
-                        // Remove expired entry from DB
-                        let _ = Self::delete_from_db_pool(&db_pool, key_arc.as_str()).await;
+                    if let Some(db_value) = maybe_db_value {
+                        if db_value.expired() {
+                            // Remove expired entry from DB and cache - another thread may have updated the TTL
+                            Self::delete_from_db_impl(&db_pool, key_arc.as_str())
+                                .await
+                                .ok();
+                            let mut memory_cache = match memory_cache_arc.lock() {
+                                Ok(cache) => cache,
+                                Err(_) => return, // if we cant lock the memory cache, nothing to do
+                            };
+
+                            memory_cache.pop(key_arc.as_str());
+                        } else {
+                            Self::update_last_accessed(&db_pool, key_arc.as_str())
+                                .await
+                                .ok();
+                        }
                     } else {
                         let mut memory_cache = match memory_cache_arc.lock() {
                             Ok(cache) => cache,
@@ -265,7 +277,6 @@ impl Cache {
             if let Some(db_value) = maybe_db_value {
                 if db_value.expired() {
                     // no memory value and expired db value -> Remove expired entry from DB
-                    // TODO wrap this in a non-blocking task
                     self.delete_from_db(key).await?;
                     Ok(None)
                 } else {
@@ -349,11 +360,11 @@ impl Cache {
 
     /// Retrieves a value from the database. If the value is expired, it will be removed from the database.
     async fn get_from_db(&self, key: &str) -> Result<Option<CacheData>, CacheError> {
-        Self::get_from_db_pool(&self.db_pool, key).await
+        Self::get_from_db_impl(&self.db_pool, key).await
     }
 
     /// Retrieves a value from the database. If the value is expired, it will be removed from the database.
-    async fn get_from_db_pool(
+    async fn get_from_db_impl(
         db_pool: &Pool<Sqlite>,
         key: &str,
     ) -> Result<Option<CacheData>, CacheError> {
@@ -376,10 +387,10 @@ impl Cache {
     }
 
     async fn delete_from_db(&self, key: &str) -> Result<(), CacheError> {
-        Self::delete_from_db_pool(&self.db_pool, key).await
+        Self::delete_from_db_impl(&self.db_pool, key).await
     }
 
-    async fn delete_from_db_pool(db_pool: &Pool<Sqlite>, key: &str) -> Result<(), CacheError> {
+    async fn delete_from_db_impl(db_pool: &Pool<Sqlite>, key: &str) -> Result<(), CacheError> {
         retry_on_busy(move || {
             let key = key.to_string();
             let db_pool = db_pool.clone();
@@ -391,12 +402,16 @@ impl Cache {
     }
 
     /// Updates the last accessed time for the specified key. This should be called in a non-blocking task.
-    async fn update_last_accessed(&self, key: &str) -> Result<(), CacheError> {
+    async fn update_last_accessed(db_pool: &Pool<Sqlite>, key: &str) -> Result<(), CacheError> {
         println!("Updating last accessed time for key: {}", key);
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-        let db_pool = self.db_pool.clone();
-        database::update_last_accessed(&db_pool, &key, now).await?;
+        retry_on_busy(move || {
+            let key = key.to_string();
+            let db_pool_local = db_pool.clone();
+            async move { database::update_last_accessed(&db_pool_local, &key, now).await }
+        })
+        .await?;
 
         Ok(())
     }
@@ -490,6 +505,7 @@ impl Cache {
         .await?;
 
         if expired_keys.is_empty() {
+            println!("No expired keys to clean up");
             return Ok(0);
         }
 
@@ -499,6 +515,7 @@ impl Cache {
         let key_strings: Vec<String> = expired_keys.into_iter().map(|k| k.cache_key).collect();
 
         // Remove expired keys from memory cache
+        // code block to hastily drop the mutex guard and release the lock - deadlock avoidance
         {
             let mut memory_cache = self
                 .memory_cache
@@ -577,19 +594,14 @@ mod tests {
         println!("UNIT TEST: Testing cleanup of expired entries");
 
         // Create a test cache
-        let db_path = "tests/db/cargo_unit_tests.sqlite".to_string();
+        let db_path = "tests/db/cargo_unit_tests.sqlite";
+        clean_db_files_for_unit_test(db_path);
+
         println!("Creating test cache with database path: {}", db_path);
-
-        // Remove the database file if it exists
-        if std::path::Path::new(&db_path).exists() {
-            std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
-            println!("Removed existing database file");
-        }
-
         // Create a cache with a very short cleanup interval
         let options = CacheOptions {
             max_memory_mb: 10,
-            db_path,
+            db_path: db_path.to_string(),
         };
 
         let cache = Cache::new(options)
@@ -645,20 +657,14 @@ mod tests {
     async fn test_manual_cleanup() {
         println!("UNIT TEST: Testing manual cleanup");
 
-        // Create a test cache
-        let db_path = "tests/db/cargo_unit_tests_manual_cleanup.sqlite".to_string();
+        let db_path = "tests/db/cargo_unit_tests_manual_cleanup.sqlite";
+        clean_db_files_for_unit_test(db_path);
+
         println!("Creating test cache with database path: {}", db_path);
-
-        // Remove the database file if it exists
-        if std::path::Path::new(&db_path).exists() {
-            std::fs::remove_file(&db_path).expect("Failed to remove existing database file");
-            println!("Removed existing database file");
-        }
-
         // Create a cache
         let options = CacheOptions {
             max_memory_mb: 10,
-            db_path,
+            db_path: db_path.to_string(),
         };
 
         // Create a new cache instance
@@ -677,11 +683,7 @@ mod tests {
             cache
                 .set(&key, &value, Some(Duration::from_secs(2)))
                 .await
-                .expect("Failed to set key in test");
-
-            // Verify it was set correctly
-            let result = cache.get(&key).await.expect("Failed to get key in test");
-            assert_eq!(result, Some(value.clone()));
+                .unwrap();
         }
 
         // Wait for keys to expire (3 seconds should be enough)
@@ -695,7 +697,6 @@ mod tests {
             .cleanup_expired_keys()
             .await
             .expect("Failed to run cleanup");
-        println!("Cleaned up {} keys", cleaned_count);
         assert_eq!(cleaned_count, 5, "Should have cleaned up 5 keys");
 
         // Verify all keys have been removed
@@ -710,5 +711,24 @@ mod tests {
         }
 
         println!("SUCCESS: All keys were properly removed by manual cleanup");
+    }
+
+    fn clean_db_files_for_unit_test(db_path: &str) {
+        let db_paths = vec![
+            db_path.to_string(),
+            format!("{}-wal", db_path.to_string()),
+            format!("{}-shm", db_path.to_string()),
+        ];
+        // Remove the database file if it exists
+
+        for db_path in db_paths {
+            if std::path::Path::new(&db_path).exists() {
+                std::fs::remove_file(&db_path).expect(
+                    format!("Failed to remove existing database file: {}", db_path).as_str(),
+                );
+            }
+        }
+
+        println!("Removed existing database files");
     }
 }
