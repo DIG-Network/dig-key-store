@@ -4,7 +4,6 @@ mod napi_impl {
     use napi_derive::napi;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::runtime::Runtime;
 
     use crate::{Cache, CacheError, CacheOptions};
 
