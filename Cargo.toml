@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2024"
 description = "A dual-layer caching library with SQLite backend and in-memory LRU cache"
 
+
 [features]
 default = []
 napi-bindings = ["napi", "napi-derive", "napi-build"]
@@ -24,6 +25,7 @@ napi-build = { version = "2.3.1", optional = true }
 crate-type = ["cdylib", "rlib"]
 
 [profile.release]
+panic = "unwind"
 lto = true
 strip = "symbols"
 
