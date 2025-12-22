@@ -266,7 +266,9 @@ impl Cache {
                             if e.is_panic() {
                                 eprintln!("reconcile task PANICKED: {e}");
                             } else if e.is_cancelled() {
-                                eprintln!("reconcile task was CANCELLED (runtime shutting down?): {e}");
+                                eprintln!(
+                                    "reconcile task was CANCELLED (runtime shutting down?): {e}"
+                                );
                             } else {
                                 eprintln!("reconcile task failed: {e}");
                             }
