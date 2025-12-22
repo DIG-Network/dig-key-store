@@ -8,11 +8,6 @@ mod napi_impl {
 
     use crate::{Cache, CacheError, CacheOptions};
 
-    // Thread-local runtime for executing async code
-    thread_local! {
-        static RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
-    }
-
     // Helper function to convert CacheError to napi::Error
     fn convert_error(err: CacheError) -> napi::Error {
         napi::Error::new(Status::GenericFailure, format!("{}", err))
