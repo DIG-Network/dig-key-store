@@ -35,7 +35,7 @@ test.before(async () => {
 });
 
 test('JsCache - set and get', async (t) => {
-  const cache = new JsCache({
+  const cache = await await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
@@ -50,7 +50,7 @@ test('JsCache - set and get', async (t) => {
 });
 
 test('JsCache - delete', async (t) => {
-  const cache = new JsCache({
+  const cache = await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
@@ -65,7 +65,7 @@ test('JsCache - delete', async (t) => {
 });
 
 test('JsCache - expiration', async (t) => {
-  const cache = new JsCache({
+  const cache = await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
@@ -83,7 +83,7 @@ test('JsCache - expiration', async (t) => {
 });
 
 test('JsCache - memory cache TTL eviction', async (t) => {
-  const cache = new JsCache({
+  const cache = await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
@@ -100,7 +100,7 @@ test('JsCache - memory cache TTL eviction', async (t) => {
 });
 
 test('JsCache - memory pressure eviction', async (t) => {
-  const cache = await new JsCache({
+  const cache = await await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
@@ -123,11 +123,11 @@ test('JsCache - memory pressure eviction', async (t) => {
 });
 
 test('JsCache - cross layer synchronization', async (t) => {
-  const cache1 = new JsCache({
+  const cache1 = await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
-  const cache2 = new JsCache({
+  const cache2 = await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
@@ -154,7 +154,7 @@ test('JsCache - simulated concurrent access', async (t) => {
 
   const caches = [];
   for (let i = 0; i < numClients; i++) {
-    caches.push(new JsCache({
+    caches.push(await JsCache.create({
       maxMemoryMb: 10,
       dbPath: JS_TEST_DB_PATH,
     }));
@@ -179,7 +179,7 @@ test('JsCache - simulated concurrent access', async (t) => {
 });
 
 test('JsCache - memory limit enforcement', async (t) => {
-  const cache = new JsCache({
+  const cache = await JsCache.create({
     maxMemoryMb: 10,
     dbPath: JS_TEST_DB_PATH,
   });
