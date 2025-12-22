@@ -43,19 +43,14 @@ where
             Err(err) if is_sqlite_busy_error(&err) => {
                 retry_count += 1;
                 if retry_count > max_retries {
-                    println!(
+                    eprintln!(
                         "Database is busy/locked, max retries ({}) exceeded",
                         max_retries
                     );
                     return Err(CacheError::DatabaseError(err));
                 }
 
-                // If we get a busy error, wait with a constant minimal delay and retry
-                println!(
-                    "Database is busy/locked, retrying in {}ms (attempt {}/{})",
-                    retry_delay_ms, retry_count, max_retries
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
                 continue;
             }
             Err(err) => return Err(CacheError::DatabaseError(err)),

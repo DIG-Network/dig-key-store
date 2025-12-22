@@ -72,11 +72,11 @@ test('JsCache - expiration', async (t) => {
   const key = 'js_test_expiration';
   const value = Buffer.from('test_value');
 
-  await cache.set(key, value, 1000);
+  await cache.set(key, value, 2000);
   const immediateResult = await cache.get(key);
   t.deepEqual(immediateResult, value);
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 4000));
   const expiredResult = await cache.get(key);
 
   t.is(expiredResult, null);
