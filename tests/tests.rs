@@ -19,16 +19,16 @@ pub fn clean_db_files_once() {
         let shm_path_str = format!("{}-shm", INTEGRATION_TESTS_RS_DB_PATH);
 
         // Ensure the tests/db directory exists
-        if let Some(parent) = Path::new(db_path).parent() {
-            if !parent.exists() {
-                println!("Creating directory for test database: {:?}", parent);
-                fs::create_dir_all(parent).unwrap_or_else(|e| {
-                    println!(
-                        "Warning: Failed to create directory for test database: {}",
-                        e
-                    );
-                });
-            }
+        if let Some(parent) = Path::new(db_path).parent()
+            && !parent.exists()
+        {
+            println!("Creating directory for test database: {:?}", parent);
+            fs::create_dir_all(parent).unwrap_or_else(|e| {
+                println!(
+                    "Warning: Failed to create directory for test database: {}",
+                    e
+                );
+            });
         }
 
         // Delete the main database file if it exists

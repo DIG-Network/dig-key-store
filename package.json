@@ -1,8 +1,8 @@
 {
   "name": "@dignetwork/dig-key-value-store",
-  "version": "0.1.0",
-  "main": "index.cjs",
-  "types": "index.d.ts",
+  "version": "1.0.0",
+  "main": "napi-build/index.js",
+  "types": "napi-build/index.d.ts",
   "engines": {
     "node": ">= 22.17"
   },
@@ -19,6 +19,11 @@
     "type": "git",
     "url": "https://github.com/DIG-Network/dig-key-value-store"
   },
+  "files": [
+    "napi-build/index.d.ts",
+    "napi-build/*.node",
+    "napi-build/index.js"
+  ],
   "napi": {
     "targets": [
       "aarch64-apple-darwin",

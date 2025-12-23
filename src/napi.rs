@@ -4,14 +4,8 @@ mod napi_impl {
     use napi_derive::napi;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::runtime::Runtime;
 
     use crate::{Cache, CacheError, CacheOptions};
-
-    // Thread-local runtime for executing async code
-    thread_local! {
-        static RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
-    }
 
     // Helper function to convert CacheError to napi::Error
     fn convert_error(err: CacheError) -> napi::Error {
@@ -31,16 +25,14 @@ mod napi_impl {
 
     #[napi]
     impl JsCache {
-        #[napi(constructor)]
-        pub fn new(options: JsCacheOptions) -> napi::Result<Self> {
+        #[napi(factory)]
+        pub async fn create(options: JsCacheOptions) -> napi::Result<Self> {
             let rust_options = CacheOptions {
                 max_memory_mb: options.max_memory_mb as usize,
                 db_path: options.db_path,
             };
 
-            let cache = RUNTIME.with(|rt| {
-                rt.block_on(async { Cache::new(rust_options).await.map_err(convert_error) })
-            })?;
+            let cache = Cache::new(rust_options).await.map_err(convert_error)?;
 
             Ok(Self {
                 cache: Arc::new(cache),

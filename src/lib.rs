@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 use std::result::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
@@ -43,19 +43,14 @@ where
             Err(err) if is_sqlite_busy_error(&err) => {
                 retry_count += 1;
                 if retry_count > max_retries {
-                    println!(
+                    eprintln!(
                         "Database is busy/locked, max retries ({}) exceeded",
                         max_retries
                     );
                     return Err(CacheError::DatabaseError(err));
                 }
 
-                // If we get a busy error, wait with a constant minimal delay and retry
-                println!(
-                    "Database is busy/locked, retrying in {}ms (attempt {}/{})",
-                    retry_delay_ms, retry_count, max_retries
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
                 continue;
             }
             Err(err) => return Err(CacheError::DatabaseError(err)),
@@ -135,10 +130,10 @@ pub struct CacheOptions {
 /// }
 /// ```
 pub struct Cache {
-    memory_cache: Arc<Mutex<LruCache<String, CacheData>>>,
+    memory_cache: Arc<tokio::sync::Mutex<LruCache<String, CacheData>>>,
     db_pool: Pool<Sqlite>,
     options: CacheOptions,
-    current_memory_usage: Arc<Mutex<usize>>,
+    current_memory_usage: Arc<tokio::sync::Mutex<usize>>,
 }
 
 impl Cache {
@@ -150,10 +145,10 @@ impl Cache {
         let max_items = NonZeroUsize::new(MAX_LRU_CACHE_ITEMS).ok_or_else(|| {
             CacheError::InvalidValue("MAX_LRU_CACHE_ITEMS cannot be zero".to_string())
         })?;
-        let memory_cache = Arc::new(Mutex::new(LruCache::new(max_items)));
+        let memory_cache = Arc::new(tokio::sync::Mutex::new(LruCache::new(max_items)));
 
         // Initialize memory usage tracker
-        let current_memory_usage = Arc::new(Mutex::new(0));
+        let current_memory_usage = Arc::new(tokio::sync::Mutex::new(0));
 
         let cache = Self {
             memory_cache,
@@ -177,10 +172,7 @@ impl Cache {
         self.set_in_db(key, value, expires).await?;
 
         // Update memory cache and track memory usage
-        let mut memory_cache = self
-            .memory_cache
-            .lock()
-            .map_err(|_| CacheError::MutexLockError)?;
+        let mut memory_cache = self.memory_cache.lock().await;
 
         // Add new value size to memory usage
         let new_value = value.to_vec();
@@ -202,7 +194,8 @@ impl Cache {
             0
         };
 
-        self.update_memory_usage(Some(new_size), Some(removed_size))?;
+        self.update_memory_usage(Some(new_size), Some(removed_size))
+            .await?;
 
         Ok(())
     }
@@ -214,18 +207,30 @@ impl Cache {
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
         // Check if key exists in memory cache
         let maybe_memory_value = {
-            let mut memory_cache = self
-                .memory_cache
-                .lock()
-                .map_err(|_| CacheError::MutexLockError)?;
-            if let Some(value) = memory_cache.get(key) {
+            let maybe_value = {
+                let mut memory_cache = self.memory_cache.lock().await;
+                match memory_cache.get(key) {
+                    Some(value) => {
+                        if value.expired() {
+                            // Remove expired entry from memory cache
+                            memory_cache.pop(key);
+                            None
+                        } else {
+                            Some(value.data.clone())
+                        }
+                    }
+                    None => None,
+                }
+            };
+
+            if let Some(value) = maybe_value {
                 // spawn non-blocking task to check that the value is valid in the database
                 let memory_cache_arc = self.memory_cache.clone();
                 let db_pool = self.db_pool.clone();
                 let key_arc = Arc::new(key.to_string());
 
                 // non-blocking task to check that the value is valid and present in the database
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     // without an established logger, dont bother handling errors in this fn, just give up
                     let maybe_db_value =
                         match Self::get_from_db_impl(&db_pool, key_arc.as_str()).await {
@@ -239,10 +244,7 @@ impl Cache {
                             Self::delete_from_db_impl(&db_pool, key_arc.as_str())
                                 .await
                                 .ok();
-                            let mut memory_cache = match memory_cache_arc.lock() {
-                                Ok(cache) => cache,
-                                Err(_) => return, // if we cant lock the memory cache, nothing to do
-                            };
+                            let mut memory_cache = memory_cache_arc.lock().await;
 
                             memory_cache.pop(key_arc.as_str());
                         } else {
@@ -251,22 +253,30 @@ impl Cache {
                                 .ok();
                         }
                     } else {
-                        let mut memory_cache = match memory_cache_arc.lock() {
-                            Ok(cache) => cache,
-                            Err(_) => return, // if we cant lock the memory cache, nothing to do
-                        };
+                        let mut memory_cache = memory_cache_arc.lock().await;
 
                         memory_cache.pop(key_arc.as_str());
                     }
                 });
 
-                if value.expired() {
-                    // Remove expired entry from memory cache
-                    memory_cache.pop(key);
-                    None
-                } else {
-                    Some(value.data.clone())
-                }
+                tokio::spawn(async move {
+                    match handle.await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            if e.is_panic() {
+                                eprintln!("reconcile task PANICKED: {e}");
+                            } else if e.is_cancelled() {
+                                eprintln!(
+                                    "reconcile task was CANCELLED (runtime shutting down?): {e}"
+                                );
+                            } else {
+                                eprintln!("reconcile task failed: {e}");
+                            }
+                        }
+                    }
+                });
+
+                Some(value)
             } else {
                 None
             }
@@ -281,13 +291,10 @@ impl Cache {
                     Ok(None)
                 } else {
                     // valid db value -> add to memory cache and track memory usage
-                    let mut memory_cache = self
-                        .memory_cache
-                        .lock()
-                        .map_err(|_| CacheError::MutexLockError)?;
+                    let mut memory_cache = self.memory_cache.lock().await;
 
                     let size = db_value.data.len() + key.len();
-                    self.update_memory_usage(Some(size), None)?;
+                    self.update_memory_usage(Some(size), None).await?;
 
                     memory_cache.put(key.to_string(), db_value.clone());
 
@@ -306,16 +313,13 @@ impl Cache {
     pub async fn delete(&self, key: &str) -> Result<(), CacheError> {
         // Remove from memory cache and update memory usage
         {
-            let mut memory_cache = self
-                .memory_cache
-                .lock()
-                .map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_cache = self.memory_cache.lock().await;
 
             // Get the value being deleted to calculate its size
             if let Some(value) = memory_cache.pop(key) {
                 // Subtract the size of the key and value from memory usage
                 let size = value.data.len() + key.len();
-                self.update_memory_usage(None, Some(size))?
+                self.update_memory_usage(None, Some(size)).await?
             }
         }
 
@@ -428,16 +432,13 @@ impl Cache {
         .transpose()
     }
 
-    fn update_memory_usage(
+    async fn update_memory_usage(
         &self,
         add: Option<usize>,
         sub: Option<usize>,
     ) -> Result<(), CacheError> {
         {
-            let mut memory_usage = self
-                .current_memory_usage
-                .lock()
-                .map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_usage = self.current_memory_usage.lock().await;
             if let Some(add) = add {
                 *memory_usage = memory_usage.saturating_add(add);
             }
@@ -458,14 +459,8 @@ impl Cache {
 
         tokio::spawn(async move {
             // return on locking error because this is a non-blocking task so the
-            let mut memory_cache = match memory_cache_arc.lock() {
-                Ok(cache) => cache,
-                Err(_) => return,
-            };
-            let mut memory_usage = match memory_usage_arc.lock() {
-                Ok(usage) => usage,
-                Err(_) => return,
-            };
+            let mut memory_cache = memory_cache_arc.lock().await;
+            let mut memory_usage = memory_usage_arc.lock().await;
 
             let max_memory_bytes = max_memory_mb * 1024 * 1024;
             while *memory_usage > max_memory_bytes && memory_cache.len() > 1 {
@@ -509,16 +504,13 @@ impl Cache {
         // Remove expired keys from memory cache
         // code block to hastily drop the mutex guard and release the lock - deadlock avoidance
         {
-            let mut memory_cache = self
-                .memory_cache
-                .lock()
-                .map_err(|_| CacheError::MutexLockError)?;
+            let mut memory_cache = self.memory_cache.lock().await;
 
             for key in &key_strings {
                 if let Some(value) = memory_cache.pop(key) {
                     // Subtract the size of the key and value from memory usage
                     let size = value.data.len() + key.len();
-                    self.update_memory_usage(None, Some(size))?;
+                    self.update_memory_usage(None, Some(size)).await?;
                 }
             }
         }
@@ -713,9 +705,9 @@ mod tests {
 
         for db_path in db_paths {
             if std::path::Path::new(&db_path).exists() {
-                std::fs::remove_file(&db_path).expect(
-                    format!("Failed to remove existing database file: {}", db_path).as_str(),
-                );
+                std::fs::remove_file(&db_path).unwrap_or_else(|_| {
+                    panic!("Failed to remove existing database file: {}", db_path)
+                })
             }
         }
 
