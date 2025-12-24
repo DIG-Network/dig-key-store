@@ -1,6 +1,6 @@
 [package]
 name = "dig-key-store"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "A dual-layer caching library with SQLite backend and in-memory LRU cache"
 

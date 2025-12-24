@@ -1,6 +1,6 @@
 {
   "name": "@dignetwork/dig-key-value-store",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "napi-build/index.js",
   "types": "napi-build/index.d.ts",
   "engines": {
